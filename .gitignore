@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+.venv/
+dist/
+_deps/
+.env
+/primebuddy
+/env.sh
+.DS_Store
+.env.*
+/data/
+/runtime/
+/logs/
+model.json
+credential.json
+# 实机部署与排查记录保留在本地。
+/docs/deployment-*.md
+/docs/latency-*.md
+/docs/voice-followup-diagnosis-*.md

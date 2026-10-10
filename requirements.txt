@@ -1,0 +1,2 @@
+# 框架核心仅使用 Python 标准库；ROS 由 T1 环境提供。
+# 每个 skill 在自己的 manifest.json 中声明依赖，由技能安装器安装。

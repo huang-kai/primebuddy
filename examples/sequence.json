@@ -1,0 +1,7 @@
+{
+  "reply": "",
+  "tasks": [
+    {"id":"music","skill":"diangetai","action":"play","args":{"artist":"周杰伦","song":""},"after":[]},
+    {"id":"light","skill":"yeelight","action":"set_power","args":{"power":false,"scope":"room","room":"客厅","device":""},"after":["music"]}
+  ]
+}
