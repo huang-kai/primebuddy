@@ -1,7 +1,6 @@
 """ZIP / Git 获取、校验、依赖和安装状态；不包含任何技能业务分支。"""
 from contextlib import contextmanager
 import fcntl
-import hashlib
 import importlib.util
 from pathlib import Path, PurePosixPath
 import re
@@ -35,7 +34,11 @@ def installation_lock():
 
 
 def load_skill_records():
-    return read_config(config_path('skills.yaml'))
+    index = read_config(config_path('skills.yaml'))
+    for record in index.values():
+        for key in ('source', 'type', 'ref', 'commit', 'sha256'):
+            record.pop(key, None)
+    return index
 
 
 def unpack(archive, directory):
@@ -97,7 +100,6 @@ def fetch_skill_package(source, target, ref=None):
             raise SetupError('--ref 只适用于 Git 仓库。')
         tree = target / 'source'
         shutil.copytree(local, tree, symlinks=True, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
-        origin = {'type': 'directory', 'source': str(local.resolve())}
     elif (local.is_file() and local.suffix.lower() == '.zip') or online_zip:
         if ref:
             raise SetupError('--ref 只适用于 Git 仓库。')
@@ -114,10 +116,8 @@ def fetch_skill_package(source, target, ref=None):
                     output.write(chunk)
         if archive.stat().st_size > MAX_PACKAGE:
             raise SetupError('ZIP 大小超过 100 MiB。')
-        fingerprint = hashlib.sha256(archive.read_bytes()).hexdigest()
         tree = target / 'source'
         unpack(archive, tree)
-        origin = {'type': 'zip', 'source': source if online_zip else str(local.resolve()), 'sha256': fingerprint}
     else:
         if source.startswith('https://'):
             https_url(source)
@@ -140,13 +140,12 @@ def fetch_skill_package(source, target, ref=None):
             revision = run_install_command(['git', 'rev-parse', '--verify', '--end-of-options', 'refs/remotes/origin/' + ref + '^{commit}'], cwd=tree)
         run_install_command(['git', '-c', 'core.hooksPath=/dev/null', 'checkout', '--quiet', '--detach', revision], cwd=tree)
         shutil.rmtree(tree / '.git')
-        origin = {'type': 'git', 'source': str(local.resolve()) if local.is_dir() else source, 'ref': ref or 'HEAD', 'commit': revision}
     if any(p.is_symlink() for p in tree.rglob('*')):
         raise SetupError('技能包不允许符号链接。')
     candidates = [tree] if (tree / 'SKILL.md').is_file() else [p for p in tree.iterdir() if p.is_dir() and (p / 'SKILL.md').is_file()]
     if len(candidates) != 1:
         raise SetupError('技能包根目录或唯一的一层子目录中须包含 SKILL.md。')
-    return candidates[0], origin
+    return candidates[0]
 
 
 def load_entry(root, relative):
@@ -202,7 +201,7 @@ def install(source, ui=None, ref=None, replace=False):
         skills = private_dir(get_data_directory() / 'skills')
         with tempfile.TemporaryDirectory(prefix='.install-', dir=skills) as temp:
             report('正在获取技能文件…')
-            root, origin = fetch_skill_package(str(source), Path(temp), ref)
+            root = fetch_skill_package(str(source), Path(temp), ref)
             data = load_skill_metadata(root)
             name = data['name']
             destination = skills / name
@@ -240,7 +239,7 @@ def install(source, ui=None, ref=None, replace=False):
                 if result is not None:
                     write_config(config_path('config.yaml', skill=name), result)
                 index[name] = {'path': name, 'version': data['version'], 'ready': result is not None,
-                               'enabled': result is not None, **origin}
+                               'enabled': result is not None}
                 write_config(config_path('skills.yaml'), index)
                 committed = True
             except BaseException:
@@ -299,7 +298,7 @@ def discover_skill_records():
             configured = (not (data.get('setup') or data.get('configure'))
                           or config_path('config.yaml', skill=name).is_file())
             index[name] = {'root': folder.resolve(), 'version': data['version'],
-                           'ready': configured, 'enabled': True, 'type': 'directory'}
+                           'ready': configured, 'enabled': True}
     return index
 
 

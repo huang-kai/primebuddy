@@ -87,8 +87,6 @@ def stage_application(source, stage):
     # 只复制框架文件；即使从已安装目录升级，也不复制私有配置和技能数据。
     names = ['main.py', 'README.md', 'requirements.txt', 'src', 'resource', 'scripts',
              'cfg/config.example.yaml', 'cfg/providers.example.yaml']
-    if (source / 'docs').exists():
-        names.append('docs')
     for name in names:
         path, target = source / name, stage / name
         if path.is_symlink() or (path.is_dir() and any(item.is_symlink() for item in path.rglob('*'))):
@@ -147,7 +145,7 @@ def install(home):
     home = home.expanduser().resolve()
     if ':' in str(home):
         raise RuntimeError('命令目录不能包含 PATH 分隔符“:”。')
-    if any(home.is_relative_to(source / name) for name in ('src', 'resource', 'scripts', 'docs', 'cfg')):
+    if any(home.is_relative_to(source / name) for name in ('src', 'resource', 'scripts', 'cfg')):
         raise RuntimeError('统一应用目录不能放在框架源码或资源子目录中。')
     os.environ['PRIMEBUDDY_HOME'] = str(home)
     home.mkdir(parents=True, exist_ok=True, mode=0o700)

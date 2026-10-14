@@ -34,7 +34,7 @@ primebuddy onboard
 
 `python3 main.py install --home PATH` 指定整个应用目录；未指定时读取 `PRIMEBUDDY_HOME`，再使用默认 `~/.primebuddy`。生成的命令绑定该目录，日常无需设置环境变量。CLI 中的相对文件路径仍相对于执行命令时的当前目录。安装时不会启动语音会话。框架使用系统 Python 和部署的 ROS 消息绑定，不从外部 SDK 编译或覆盖原厂消息包；固件升级后需要重新确认环境路径。
 
-升级时先退出 PrimeBuddy，再从新版本解压目录执行同一安装命令。安装器暂存新代码和依赖后替换框架文件，保留实际配置、已安装技能、登录态和运行记录；替换失败会回滚。正在运行或有其他安装、配置任务时拒绝升级。ZIP 解压后的顶层目录仍叫 `primebuddy`，它是安装来源，正式应用位于 `~/.primebuddy`。
+升级时先退出 PrimeBuddy，再从新版本解压目录执行同一安装命令。安装器暂存新代码和依赖后替换框架文件，保留实际配置、已安装技能、登录态和运行记录；替换失败会回滚。正在运行或有其他安装、配置任务时拒绝升级。ZIP 解压后的顶层目录仍叫 `primebuddy`，正式应用位于 `~/.primebuddy`；安装器不记录解压路径，安装后可删除解压目录。
 
 `start` 前台运行，预检通过后将原厂 Agent 切换为 `only_voice` 并重启；Ctrl+C 退出时恢复原模式。点歌台开启联动后可能产生身体运动，使用条件见技能 README。
 
@@ -68,7 +68,7 @@ primebuddy skill enable diangetai
 primebuddy skill install /tmp/diangetai-skill.zip --replace
 ```
 
-`primebuddy skill list` 显示已发现技能的名称、版本、状态和实际目录，包括停用、待配置和缺少前置条件的技能。安装记录持久保存在私有 `cfg/skills.yaml`，记录来源、路径、版本、配置完成和启用状态；直接复制到技能目录的内容也会被发现，执行配置或启停命令时保存管理状态。
+`primebuddy skill list` 显示已发现技能的名称、版本、状态和实际目录，包括停用、待配置和缺少前置条件的技能。私有 `cfg/skills.yaml` 只保存技能目录、版本、配置完成和启用状态，不记录下载地址、包类型、Git ref、提交号或包指纹。旧记录的这些字段在后续安装、配置或启停保存时移除；直接复制到技能目录的内容也会被发现，执行配置或启停命令时保存管理状态。
 
 启动时，框架从磁盘建立内存中的技能注册表。每轮向大模型提供已就绪、已启用且满足前置条件的技能名称和描述；模型选中技能后再读取完整 `SKILL.md` 和动作定义，按需查询上下文。`primebuddy skill catalog` 可查看提供给模型的目录摘要。技能安装、配置或启停后重启会话生效。
 
@@ -158,8 +158,7 @@ qianwen:
 ├── runtime/                     会话锁、恢复记录和语音缓存
 ├── resource/                    框架资源与随包技能 ZIP
 ├── _deps/                       系统缺少时安装的 Python 依赖
-├── scripts/                     安装和开发脚本
-└── docs/                        可选文档，安装来源提供时复制
+└── scripts/                     安装和开发脚本
 ```
 
 技能和其私有配置、登录数据在安装或配置后生成；`_deps` 只在缺少依赖时创建。日志默认单独保存在 `/var/log/primebuddy/primebuddy.log`。日常修改实际 `cfg/config.yaml`、`cfg/providers.yaml` 和 `cfg/skills/<name>/config.yaml`；`*.example.yaml` 是公开模板，`skills.yaml` 由程序维护。
@@ -191,6 +190,6 @@ python3 main.py simulate --skills-dir ../primebuddy-skills --plan tests/fixtures
 
 当前语音入口用于技能指令和必要澄清，不提供通用闲聊或未注册的机器人动作。尚不支持实时语音打断、短停顿合句或多人说话人锁定；首次使用及空闲超时后需原厂唤醒。退出使用 Ctrl+C，当前没有后台守护、stop 命令或开机自启动。
 
-`docs/` 及各 skill 的开发文档暂时只保留在本地，GitHub 克隆、安装和打包不要求这些文件存在。主要测试数据在 `tests/fixtures/`，测试录音仅保留在本地。
+`docs/` 及各 skill 的开发文档暂时只保留在本地，框架安装器不复制文档目录；GitHub 克隆、安装和打包不要求这些文件存在。主要测试数据在 `tests/fixtures/`，测试录音仅保留在本地。
 
 源码仓库：[PrimeBuddy](https://github.com/huang-kai/primebuddy)、[PrimeSkills](https://github.com/huang-kai/primeskills)。许可证尚未选定。

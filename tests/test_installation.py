@@ -18,7 +18,7 @@ from primebuddy import __version__
 from primebuddy.skills import manager as manager
 from primebuddy.core.engine import Context, execute
 from primebuddy.skills.registry import Registry
-from primebuddy.config.storage import SetupError, get_data_directory, read_config, write_config
+from primebuddy.config.storage import SetupError, get_data_directory, config_path, read_config, write_config
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -80,7 +80,7 @@ class InstallationTests(unittest.TestCase):
         plan = {'reply': '', 'tasks': [{'id': 'one', 'skill': 'hello', 'action': 'hello', 'args': {}, 'after': []}]}
         result = execute(plan, registry, Context(), lambda _: None)
         self.assertEqual(result['one']['message'], '你好')
-        self.assertTrue(installed['sha256'])
+        self.assertEqual(set(installed), {'path', 'version', 'ready', 'enabled'})
         manager.set_enabled('hello', False)
         self.assertEqual(Registry().catalog(), [])
         manager.set_enabled('hello', True)
@@ -239,7 +239,17 @@ class InstallationTests(unittest.TestCase):
             opener.return_value.open.return_value = response
             record = manager.install('https://example.com/hello.zip', DummyUI())
         self.assertTrue(record['ready'])
-        self.assertEqual(record['source'], 'https://example.com/hello.zip')
+        self.assertEqual(set(record), {'path', 'version', 'ready', 'enabled'})
+        self.assertNotIn('https://example.com/hello.zip', config_path('skills.yaml').read_text())
+
+    def test_saved_skill_state_removes_old_installation_origin_fields(self):
+        record = manager.install(str(self.archive), DummyUI())
+        record.update(source='https://example.com/hello.zip', type='zip', ref='v0.1.0',
+                      commit='test-only-revision', sha256='test-only-fingerprint')
+        write_config(config_path('skills.yaml'), {'hello': record})
+        manager.set_enabled('hello', False)
+        saved = read_config(config_path('skills.yaml'))['hello']
+        self.assertEqual(saved, {'path': 'hello', 'version': '0.1.0', 'ready': True, 'enabled': False})
 
     def test_urls_with_embedded_secrets_are_rejected(self):
         for source in ('https://user:secret@example.com/skill.git', 'https://example.com/skill.zip?token=secret', 'http://example.com/skill.zip'):
@@ -247,24 +257,24 @@ class InstallationTests(unittest.TestCase):
                 manager.install(source)
 
     @unittest.skipUnless(shutil.which('git'), '需要本地 Git')
-    def test_git_tag_install_records_exact_commit(self):
+    def test_git_ref_installs_requested_files_without_origin_records(self):
         def git(*args):
             return subprocess.run(['git', *args], cwd=self.source, check=True, capture_output=True, text=True).stdout.strip()
         git('init', '-q')
         git('add', '.')
         git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture')
         git('tag', 'v0.1.0')
-        revision = git('rev-parse', 'HEAD')
         (self.source / 'README.md').write_text('new version')
         git('add', '.')
         git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'new')
         installed = manager.install(str(self.source), DummyUI(), ref='v0.1.0')
-        self.assertEqual(installed['commit'], revision)
+        self.assertEqual(set(installed), {'path', 'version', 'ready', 'enabled'})
         self.assertFalse((manager.get_skill_package_directory(installed) / '.git').exists())
         self.assertEqual((manager.get_skill_package_directory(installed) / 'README.md').read_text(), '测试技能')
         git('branch', 'feature')
         updated = manager.install(str(self.source), DummyUI(), ref='feature', replace=True)
-        self.assertEqual(updated['commit'], git('rev-parse', 'feature'))
+        self.assertEqual(set(updated), {'path', 'version', 'ready', 'enabled'})
+        self.assertEqual((manager.get_skill_package_directory(updated) / 'README.md').read_text(), 'new version')
 
     def test_atomic_private_yaml_and_permission_check(self):
         path = get_data_directory() / 'private.yaml'
@@ -487,7 +497,7 @@ print('BUNDLE_UPGRADE_OK')
             self.assertTrue((prefix / 'src/primebuddy/cli/commands.py').is_file())
             self.assertTrue((prefix / 'cfg/config.yaml').is_file())
             self.assertEqual((prefix / 'cfg/providers.yaml').stat().st_mode & 0o777, 0o600)
-            # 解压目录只是安装来源；删除后仍能从统一目录运行和安装随包技能。
+            # 安装后删除解压目录，仍能从统一目录运行和安装随包技能。
             shutil.rmtree(app)
             self.assertIn(sys.executable, (bindir / 'primebuddy').read_text())
             launcher = str(bindir / 'primebuddy')
@@ -534,6 +544,8 @@ print('BUNDLE_UPGRADE_OK')
             self.assertFalse((data / 'app').exists())
             self.assertTrue((data / 'bin/primebuddy').is_file())
             self.assertTrue((data / 'main.py').is_file())
+            self.assertFalse((data / 'docs').exists())
+            self.assertNotIn(str(app), (data / 'bin/primebuddy').read_text())
 
     def test_upgrade_replaces_code_and_preserves_private_files_and_installed_skills(self):
         installer = self.installer()
@@ -624,7 +636,6 @@ print('BUNDLE_UPGRADE_OK')
             directory = Path(temp)
             source = directory / 'source'
             installer.stage_application(ROOT, source)
-            shutil.rmtree(source / 'docs', ignore_errors=True)
             archive = directory / 'release.zip'
             with patch.object(build_release, 'ROOT', source):
                 build_release.build(archive, [make_skill(directory / 'hello')])
