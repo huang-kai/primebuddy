@@ -234,19 +234,22 @@ finally:
             thread.join(4)
         self.assertTrue(cleaned.exists())
 
-    def test_standard_script_and_reference_directories_survive_packaging(self):
+    def test_standard_skill_files_and_license_survive_packaging(self):
         source = create_skill(self.root / 'source')
+        (source / 'LICENSE').write_text('test-only license')
         for name in ('scripts', 'references', 'assets'):
             (source / name).mkdir()
             (source / name / 'example.txt').write_text('公开资源')
         archive = self.root / 'hello.zip'
         skill_zip(source, archive)
         with zipfile.ZipFile(archive) as package:
+            self.assertEqual(package.read('LICENSE').decode(), 'test-only license')
             self.assertIn('scripts/example.txt', package.namelist())
             self.assertIn('references/example.txt', package.namelist())
         with redirect_stdout(io.StringIO()):
             record = manager.install(archive)
         self.assertTrue(record['ready'])
+        self.assertEqual((manager.get_skill_package_directory(record) / 'LICENSE').read_text(), 'test-only license')
         self.assertEqual(Registry().read_file('hello', 'references/example.txt')['content'], '公开资源')
 
     def test_cli_install_without_configuration_does_not_require_a_terminal(self):

@@ -441,6 +441,7 @@ class ReleaseTests(unittest.TestCase):
                     self.assertIsNone(package.testzip())
                     self.assertFalse(any('docs' in Path(name).parts for name in package.namelist()))
             with zipfile.ZipFile(output / f'primebuddy-{__version__}.rpk') as framework:
+                self.assertEqual(framework.read('primebuddy/LICENSE'), (ROOT / 'LICENSE').read_bytes())
                 self.assertEqual({name for name in framework.namelist() if name.startswith('primebuddy/resource/bundled/')},
                     {'primebuddy/resource/bundled/hello-0.1.0.rpk', 'primebuddy/resource/bundled/other-0.2.0.rpk'})
                 for filename in ('hello-0.1.0.rpk', 'other-0.2.0.rpk'):
@@ -577,6 +578,7 @@ print('BUNDLE_UPGRADE_OK')
                 self.assertEqual({name.split('/')[0] for name in package.namelist()}, {'primebuddy'})
                 self.assertIn('primebuddy/resource/bundled/hello-0.1.0.rpk', package.namelist())
                 self.assertIn('primebuddy/README.md', package.namelist())
+                self.assertEqual(package.read('primebuddy/LICENSE'), (ROOT / 'LICENSE').read_bytes())
                 bundled = io.BytesIO(package.read('primebuddy/resource/bundled/hello-0.1.0.rpk'))
             with zipfile.ZipFile(bundled) as package:
                 self.assertNotIn('credential.json', package.namelist())
@@ -595,6 +597,7 @@ print('BUNDLE_UPGRADE_OK')
             self.assertFalse((prefix / 'app').exists())
             self.assertFalse((bindir / 'primebuddy').is_symlink())
             self.assertTrue((prefix / 'src/primebuddy/cli/commands.py').is_file())
+            self.assertEqual((prefix / 'LICENSE').read_bytes(), (ROOT / 'LICENSE').read_bytes())
             self.assertTrue((prefix / 'cfg/config.yaml').is_file())
             self.assertEqual((prefix / 'cfg/providers.yaml').stat().st_mode & 0o777, 0o600)
             # 安装后删除解压目录，仍能从统一目录运行和安装随包技能。

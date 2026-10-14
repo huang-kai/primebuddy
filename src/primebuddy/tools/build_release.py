@@ -26,7 +26,7 @@ def add_tree(archive, source, prefix, exclude=()):
 def skill_zip(source, output):
     data = load_skill_metadata(source)
     with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
-        for name in ('main.py', 'README.md', 'SKILL.md', 'requirements.txt'):
+        for name in ('main.py', 'README.md', 'SKILL.md', 'requirements.txt', 'LICENSE'):
             if not (source / name).is_file():
                 continue
             archive.write(source / name, name)
@@ -39,6 +39,8 @@ def framework_zip(output, bundles):
     with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
         for name in ('main.py', 'README.md', 'requirements.txt'):
             archive.write(ROOT / name, 'primebuddy/' + name)
+        if (ROOT / 'LICENSE').is_file():
+            archive.write(ROOT / 'LICENSE', 'primebuddy/LICENSE')
         for name in ('config.example.yaml', 'providers.example.yaml'):
             archive.write(ROOT / 'cfg' / name, 'primebuddy/cfg/' + name)
         for name in ('src', 'resource', 'scripts'):

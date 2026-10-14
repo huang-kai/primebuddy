@@ -22,6 +22,7 @@ PrimeBuddy 是一个让机器人通过语音调用技能的 Python 框架。你�
 - [开发一个 skill](#开发一个-skill)
 - [打包发布](#打包发布)
 - [参与贡献](#参与贡献)
+- [开源协议](#开源协议)
 
 ## 工作原理
 
@@ -149,6 +150,7 @@ source ~/.primebuddy/bin/env.sh
 ~/.primebuddy/
 ├── main.py                  程序入口
 ├── README.md                使用说明
+├── LICENSE                  MIT 开源协议
 ├── requirements.txt         框架 Python 依赖
 ├── bin/                     primebuddy 命令和终端环境脚本
 ├── src/primebuddy/           框架代码
@@ -487,3 +489,7 @@ bash scripts/test.sh
 源码目录中，`cfg/` 放公开配置模板，`src/` 放代码，`resource/` 放正式资源，`tests/` 放主要测试，`scripts/` 放安装和开发脚本。`docs/` 暂时只作为本地开发资料，不提交 Git。测试录音、生成的发布包、API Key 和账号登录态也不提交。
 
 报告问题时，请附上版本、复现步骤和必要的日志，隐去密钥和账号信息。涉及机器人运动的验证，应单独说明测试环境和安全条件。
+
+## 开源协议
+
+PrimeBuddy 框架采用 [MIT 协议](LICENSE)。分发源码或框架包时，请保留版权和许可声明。独立技能及第三方依赖遵循各自的协议。
