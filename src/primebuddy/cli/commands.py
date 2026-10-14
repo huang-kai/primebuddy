@@ -35,8 +35,8 @@ def dispatch_command(argv=None):
     actions = group.add_subparsers(dest='action', required=True)
     actions.add_parser('list', help='查看技能名称、版本、状态和安装目录')
     actions.add_parser('catalog', help='查看提供给 LLM 的就绪能力目录（JSON）')
-    install = actions.add_parser('install', help='从目录、ZIP 或 Git 仓库安装')
-    install.add_argument('source', help='本地技能目录、本地/HTTPS ZIP，或 HTTPS/SSH Git 地址')
+    install = actions.add_parser('install', help='从目录、RPK、ZIP 或 Git 仓库安装')
+    install.add_argument('source', help='本地技能目录、本地/HTTPS RPK 或 ZIP，或 HTTPS/SSH Git 地址')
     install.add_argument('--ref', help='Git 标签、分支或提交')
     install.add_argument('--no-configure', action='store_true', help='仅安装文件和依赖，标记为待配置')
     install.add_argument('--replace', action='store_true', help='配置成功后替换已有版本')
@@ -107,7 +107,7 @@ def manage_skill(args):
     if args.action == 'list':
         index = skills.discover_skill_records()
         if not index:
-            print('尚未安装技能。使用 primebuddy skill install <ZIP 或 Git 地址>。')
+            print('尚未安装技能。使用 primebuddy skill install <RPK、ZIP 或 Git 地址>。')
         for name, record in sorted(index.items()):
             metadata = skills.load_skill_metadata(record['root'])
             missing = Registry.missing_requirements(metadata)

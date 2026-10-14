@@ -1,4 +1,4 @@
-"""ZIP / Git 获取、校验、依赖和安装状态；不包含任何技能业务分支。"""
+"""RPK / ZIP / Git 获取、校验、依赖和安装状态；不包含任何技能业务分支。"""
 from contextlib import contextmanager
 import fcntl
 import importlib.util
@@ -94,17 +94,17 @@ class HttpsRedirect(urllib.request.HTTPRedirectHandler):
 
 def fetch_skill_package(source, target, ref=None):
     local = Path(source).expanduser()
-    online_zip = source.startswith('https://') and urllib.parse.urlsplit(source).path.lower().endswith('.zip')
+    online_package = source.startswith('https://') and urllib.parse.urlsplit(source).path.lower().endswith(('.zip', '.rpk'))
     if local.is_dir() and not (local / '.git').exists():
         if ref:
             raise SetupError('--ref 只适用于 Git 仓库。')
         tree = target / 'source'
         shutil.copytree(local, tree, symlinks=True, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
-    elif (local.is_file() and local.suffix.lower() == '.zip') or online_zip:
+    elif (local.is_file() and local.suffix.lower() in ('.zip', '.rpk')) or online_package:
         if ref:
             raise SetupError('--ref 只适用于 Git 仓库。')
         archive = local
-        if online_zip:
+        if online_package:
             https_url(source)
             archive = target / 'download.zip'
             size = 0
@@ -126,7 +126,7 @@ def fetch_skill_package(source, target, ref=None):
             if not parts.hostname or parts.password or parts.query or parts.fragment:
                 raise SetupError('SSH 仓库地址无效。')
         elif not re.fullmatch(r'git@[A-Za-z0-9.-]+:[A-Za-z0-9_./-]+', source) and not (local.is_dir() and (local / '.git').exists()):
-            raise SetupError('来源须为本地/HTTPS ZIP，HTTPS/SSH Git 地址或本地 Git 仓库。')
+            raise SetupError('请提供本地/HTTPS RPK 或 ZIP，HTTPS/SSH Git 地址或本地 Git 仓库。')
         if ref and (ref.startswith('-') or any(c.isspace() for c in ref)):
             raise SetupError('Git ref 无效。')
         tree = target / 'source'

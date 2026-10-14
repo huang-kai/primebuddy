@@ -1,4 +1,4 @@
-"""框架主持向导；随包技能也走普通 ZIP 安装路径。"""
+"""框架主持向导；随包技能也走普通 RPK / ZIP 安装路径。"""
 import re
 import zipfile
 
@@ -9,9 +9,11 @@ from primebuddy.skills.manager import install, configure, load_skill_records
 
 
 def bundled_skills():
-    # 发布时将独立技能打包成 ZIP 放在此目录，源码中不保留第二份业务实现。
+    # RPK 内容为 ZIP；保留旧 ZIP 包兼容，源码中不保留第二份业务实现。
     bundles = {}
-    for archive in sorted((application_directory() / 'resource/bundled').glob('*.zip')):
+    for archive in sorted((application_directory() / 'resource/bundled').glob('*')):
+        if archive.suffix.lower() not in ('.rpk', '.zip'):
+            continue
         try:
             with zipfile.ZipFile(archive) as package:
                 with package.open('SKILL.md') as source:

@@ -34,7 +34,7 @@ primebuddy onboard
 
 `python3 main.py install --home PATH` 指定整个应用目录；未指定时读取 `PRIMEBUDDY_HOME`，再使用默认 `~/.primebuddy`。生成的命令绑定该目录，日常无需设置环境变量。CLI 中的相对文件路径仍相对于执行命令时的当前目录。安装时不会启动语音会话。框架使用系统 Python 和部署的 ROS 消息绑定，不从外部 SDK 编译或覆盖原厂消息包；固件升级后需要重新确认环境路径。
 
-升级时先退出 PrimeBuddy，再从新版本解压目录执行同一安装命令。安装器暂存新代码和依赖后替换框架文件，保留实际配置、已安装技能、登录态和运行记录；替换失败会回滚。正在运行或有其他安装、配置任务时拒绝升级。ZIP 解压后的顶层目录仍叫 `primebuddy`，正式应用位于 `~/.primebuddy`；安装器不记录解压路径，安装后可删除解压目录。
+升级时先退出 PrimeBuddy，再从新版本解压目录执行同一安装命令。安装器暂存新代码和依赖后替换框架文件，保留实际配置、已安装技能、登录态和运行记录；替换失败会回滚。正在运行或有其他安装、配置任务时拒绝升级。RPK 使用 ZIP 解压方式，顶层目录叫 `primebuddy`，正式应用位于 `~/.primebuddy`；安装器不记录解压路径，安装后可删除解压目录。
 
 `start` 前台运行，预检通过后将原厂 Agent 切换为 `only_voice` 并重启；Ctrl+C 退出时恢复原模式。点歌台开启联动后可能产生身体运动，使用条件见技能 README。
 
@@ -48,16 +48,16 @@ primebuddy onboard
 primebuddy skill install ../primebuddy-skills/diangetai
 ```
 
-通过本地目录、ZIP 或 Git 安装的技能统一放到 `~/.primebuddy/skills/<name>/`，例如 `skills/diangetai/`。升级继续使用同一目录，技能代码、资源和 `_deps` 放在其中；业务配置和登录数据分别保存在 `cfg/skills/<name>/` 和 `data/<name>/`，不会混入技能代码。
+通过本地目录、RPK、ZIP 或 Git 安装的技能统一放到 `~/.primebuddy/skills/<name>/`，例如 `skills/diangetai/`。升级继续使用同一目录，技能代码、资源和 `_deps` 放在其中；业务配置和登录数据分别保存在 `cfg/skills/<name>/` 和 `data/<name>/`，不会混入技能代码。
 
 工作区的两个 skill 在相邻的 `primebuddy-skills` 中。从当前工作内容生成技能包：
 
 ```bash
-python3 src/primebuddy/tools/build_release.py --skill-only ../primebuddy-skills/diangetai --output /tmp/diangetai-skill.zip
-primebuddy skill install /tmp/diangetai-skill.zip
+python3 src/primebuddy/tools/build_release.py --skill-only ../primebuddy-skills/diangetai --output-dir /tmp/releases
+primebuddy skill install /tmp/releases/diangetai-0.3.0.rpk
 ```
 
-易来将路径换成 `../primebuddy-skills/yeelight`。技能集合根目录不能作为单个技能安装。单技能 ZIP 可以直接包含项目目录内容，也可以包一层顶层目录；单技能 Git 仓库支持 `--ref`。私有仓库沿用现有 SSH 认证。
+易来将路径换成 `../primebuddy-skills/yeelight`。技能集合根目录不能作为单个技能安装。单技能 RPK 或 ZIP 可以直接包含项目目录内容，也可以包一层顶层目录；单技能 Git 仓库支持 `--ref`。私有仓库沿用现有 SSH 认证。
 
 ```bash
 primebuddy skill list
@@ -65,7 +65,7 @@ primebuddy skill catalog
 primebuddy skill configure diangetai
 primebuddy skill disable diangetai
 primebuddy skill enable diangetai
-primebuddy skill install /tmp/diangetai-skill.zip --replace
+primebuddy skill install /tmp/releases/diangetai-0.3.0.rpk --replace
 ```
 
 `primebuddy skill list` 显示已发现技能的名称、版本、状态和实际目录，包括停用、待配置和缺少前置条件的技能。私有 `cfg/skills.yaml` 只保存技能目录、版本、配置完成和启用状态，不记录下载地址、包类型、Git ref、提交号或包指纹。旧记录的这些字段在后续安装、配置或启停保存时移除；直接复制到技能目录的内容也会被发现，执行配置或启停命令时保存管理状态。
@@ -73,6 +73,47 @@ primebuddy skill install /tmp/diangetai-skill.zip --replace
 启动时，框架从磁盘建立内存中的技能注册表。每轮向大模型提供已就绪、已启用且满足前置条件的技能名称和描述；模型选中技能后再读取完整 `SKILL.md` 和动作定义，按需查询上下文。`primebuddy skill catalog` 可查看提供给模型的目录摘要。技能安装、配置或启停后重启会话生效。
 
 无需配置的技能安装后直接可用。声明了配置步骤的技能可使用 `--no-configure` 暂缓，稍后运行 `skill configure`；配置既可以是技能自己的 Console 脚本，也可以是可选 UI 向导。升级失败保留已有版本，重新配置中断标记待配置。直接复制的技能也能使用管理命令，变更后重启会话生效。
+
+## 打包发布（RPK）
+
+在框架源码目录运行：
+
+```bash
+python3 src/primebuddy/tools/build_release.py
+```
+
+默认打包框架及相邻 `primebuddy-skills` 集合中的所有 skill，分别生成独立发布包：
+
+```text
+dist/
+├── primebuddy-1.0.0.rpk
+├── diangetai-0.3.0.rpk
+└── yeelight-0.2.0.rpk
+```
+
+文件名自动使用 `项目名-版本号.rpk`。框架版本读取 `src/primebuddy/__init__.py` 的 `__version__`；skill 名称和版本读取 `SKILL.md`、`cfg/pkg.yaml`，普通 skill 也可只用 `SKILL.md` 的 `metadata.version`。输出文件先生成 ZIP，再改为 `.rpk`，内容仍为 ZIP 格式，用于准备启元 SkillHub 发布包。
+
+框架包内继续包含本次生成的 skill RPK，放在 `resource/bundled/`，安装向导可以选择它们；同一份 skill 包也单独输出用于发布。打包不会混入旧的随包版本，开发文档、测试目录、账号登录态、实际框架配置和运行数据不进入发布包。
+
+仅打框架、仅打某个 skill 或指定输出目录：
+
+```bash
+python3 src/primebuddy/tools/build_release.py --framework-only
+python3 src/primebuddy/tools/build_release.py --skill-only ../primebuddy-skills/diangetai
+python3 src/primebuddy/tools/build_release.py --output-dir /tmp/releases
+```
+
+`--skill PATH` 可重复指定本次一起打包的技能。默认保留已有同名发布包；需要重新生成同版本包时加 `--overwrite`，或先更新项目版本。原来的 `--output 文件名` 改为 `--output-dir 目录`，无需手工填写名称或改后缀。
+
+RPK 可以用普通 ZIP 工具解压；框架包的安装方式为：
+
+```bash
+unzip dist/primebuddy-1.0.0.rpk -d /tmp/primebuddy-install
+cd /tmp/primebuddy-install/primebuddy
+source ./scripts/install.sh
+```
+
+skill 包可直接使用 `primebuddy skill install dist/diangetai-0.3.0.rpk`，HTTPS RPK 下载地址也受支持；旧 `.zip` 包仍可安装。
 
 ## 开发一个 skill
 
@@ -180,16 +221,16 @@ primebuddy skill install /tmp/diangetai-skill.zip --replace
 
    安装、修改或配置后重启框架会话，重新建立技能注册表。
 
-6. **发布时打包单个技能。** 输出路径应使用尚不存在的 ZIP 文件名：
+6. **发布时打包单个技能。** 文件名根据技能名称和版本自动生成：
 
    ```bash
    python3 src/primebuddy/tools/build_release.py \
      --skill-only ../my-skills/hello \
-     --output /tmp/hello-skill-0.1.0.zip
-   primebuddy skill install /tmp/hello-skill-0.1.0.zip
+     --output-dir /tmp/releases
+   primebuddy skill install /tmp/releases/hello-0.1.0.rpk
    ```
 
-   ZIP 可在另一台已安装 PrimeBuddy 的机器上使用；本机已有同名技能时安装命令加 `--replace`。
+   RPK 可在另一台已安装 PrimeBuddy 的机器上使用；本机已有同名技能时安装命令加 `--replace`。需要重打同版本包时，打包命令加 `--overwrite`。
 
 需要共享 `context.audio`、取消控制或调度资源时，再使用可选原生工具适配。例如在 `cfg/pkg.yaml` 声明：
 
@@ -236,7 +277,7 @@ PrimeBuddy/
 ├── requirements.txt    Python 依赖
 ├── cfg/                 公开 YAML 模板（*.example.yaml）
 ├── src/primebuddy/      按用途分组的代码
-├── resource/           正式静态资源；发布时包含 bundled 技能包
+├── resource/           正式静态资源；发布时包含 bundled RPK 技能包
 ├── tests/              主要功能回归；测试录音在 voice，音频不提交 Git
 ├── docs/               本地开发文档，可选，暂不提交 Git
 └── scripts/            安装、运行和测试脚本
@@ -295,7 +336,7 @@ qianwen:
 ├── skills/<name>/              安装或直接复制的技能、资源和 _deps
 ├── data/<name>/                 登录态等技能私有数据
 ├── runtime/                     会话锁、恢复记录和语音缓存
-├── resource/                    框架资源与随包技能 ZIP
+├── resource/                    框架资源与随包技能 RPK
 ├── _deps/                       系统缺少时安装的 Python 依赖
 └── scripts/                     安装和开发脚本
 ```

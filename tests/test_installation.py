@@ -28,16 +28,16 @@ class DummyUI:
         pass
 
 
-def make_skill(root, setup='return {}', version='0.1.0'):
+def make_skill(root, setup='return {}', version='0.1.0', name='hello'):
     for directory in ('src', 'cfg', 'docs'):
         (root / directory).mkdir(parents=True, exist_ok=True)
     (root / 'cfg/pkg.yaml').write_text(json.dumps({
         'user_id': 'robot_local', 'version': version, 'sdk_version': 'v1.0.0',
-        'package_name': 'hello', 'author': 'test-only', 'description': '测试问候',
+        'package_name': name, 'author': 'test-only', 'description': '测试问候',
         'primebuddy': {'api_version': 1, 'entrypoint': 'src/skill.py', 'setup': 'src/setup.py',
                       'actions': {'hello': {'parameters': {}, 'resources': []}}}}))
     (root / 'requirements.txt').write_text('# No third-party dependencies.\n')
-    (root / 'SKILL.md').write_text('---\nname: hello\ndescription: 测试问候\n---\n调用 hello 问候用户。')
+    (root / 'SKILL.md').write_text('---\nname: ' + name + '\ndescription: 测试问候\n---\n调用 hello 问候用户。')
     (root / 'README.md').write_text('测试技能')
     (root / 'src/setup.py').write_text('def setup(ui, data, config):\n    ' + setup + '\n')
     (root / 'src/skill.py').write_text('''from .helper import reply
@@ -242,6 +242,18 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(set(record), {'path', 'version', 'ready', 'enabled'})
         self.assertNotIn('https://example.com/hello.zip', config_path('skills.yaml').read_text())
 
+    def test_local_and_https_rpk_use_zip_installation_and_configuration(self):
+        archive = self.root / 'hello-0.1.0.rpk'
+        shutil.copyfile(self.archive, archive)
+        record = manager.install(archive, DummyUI())
+        self.assertTrue(record['ready'])
+        self.assertTrue((manager.get_skill_package_directory(record) / 'SKILL.md').is_file())
+        with patch('primebuddy.skills.manager.urllib.request.build_opener') as opener:
+            opener.return_value.open.return_value = io.BytesIO(archive.read_bytes())
+            updated = manager.install('https://example.com/hello-0.1.0.rpk', DummyUI(), replace=True)
+        self.assertTrue(updated['ready'])
+        self.assertEqual(updated['version'], '0.1.0')
+
     def test_saved_skill_state_removes_old_installation_origin_fields(self):
         record = manager.install(str(self.archive), DummyUI())
         record.update(source='https://example.com/hello.zip', type='zip', ref='v0.1.0',
@@ -387,6 +399,79 @@ class ReleaseTests(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
+    def test_default_cli_builds_versioned_rpks_and_reuses_bundled_skill_bytes(self):
+        from primebuddy.tools import build_release as builder
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            source = directory / 'primebuddy'
+            self.installer().stage_application(ROOT, source)
+            collection = directory / 'primebuddy-skills'
+            make_skill(collection / 'hello')
+            make_skill(collection / 'other', version='0.2.0', name='other')
+            (source / 'docs').mkdir()
+            (source / 'docs/private.md').write_text('do-not-ship')
+            old_bundle = source / 'resource/bundled/obsolete.zip'
+            old_bundle.parent.mkdir(parents=True)
+            old_bundle.write_bytes(b'old package must not be copied')
+            output = directory / 'release'
+            with patch.object(builder, 'ROOT', source), \
+                    patch.object(sys, 'argv', ['build_release.py', '--output-dir', str(output)]), \
+                    patch.object(sys, 'stdout', io.StringIO()):
+                builder.main()
+            names = {path.name for path in output.iterdir()}
+            self.assertEqual(names, {f'primebuddy-{__version__}.rpk', 'hello-0.1.0.rpk', 'other-0.2.0.rpk'})
+            for path in output.iterdir():
+                self.assertTrue(zipfile.is_zipfile(path))
+                with zipfile.ZipFile(path) as package:
+                    self.assertIsNone(package.testzip())
+                    self.assertFalse(any('docs' in Path(name).parts for name in package.namelist()))
+            with zipfile.ZipFile(output / f'primebuddy-{__version__}.rpk') as framework:
+                self.assertNotIn('primebuddy/resource/bundled/obsolete.zip', framework.namelist())
+                for filename in ('hello-0.1.0.rpk', 'other-0.2.0.rpk'):
+                    self.assertEqual(framework.read('primebuddy/resource/bundled/' + filename), (output / filename).read_bytes())
+
+    def test_single_skill_cli_preserves_existing_rpk_unless_overwrite_is_requested(self):
+        from primebuddy.tools import build_release as builder
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            skill = make_skill(directory / 'hello')
+            output = directory / 'release'
+            arguments = ['build_release.py', '--skill-only', str(skill), '--output-dir', str(output)]
+            with patch.object(sys, 'argv', arguments), patch.object(sys, 'stdout', io.StringIO()):
+                builder.main()
+            archive = output / 'hello-0.1.0.rpk'
+            before = archive.read_bytes()
+            (skill / 'README.md').write_text('updated package')
+            with patch.object(sys, 'argv', arguments), patch.object(sys, 'stderr', io.StringIO()), \
+                    self.assertRaises(SystemExit):
+                builder.main()
+            self.assertEqual(archive.read_bytes(), before)
+            with patch.object(sys, 'argv', [*arguments, '--overwrite']), patch.object(sys, 'stdout', io.StringIO()):
+                builder.main()
+            with zipfile.ZipFile(archive) as package:
+                self.assertEqual(package.read('README.md').decode(), 'updated package')
+            self.assertEqual([path.name for path in output.iterdir()], ['hello-0.1.0.rpk'])
+
+    def test_failed_rebuild_keeps_existing_packages_and_framework_only_has_no_skills(self):
+        from primebuddy.tools import build_release as builder
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            skill = make_skill(directory / 'hello')
+            output = directory / 'release'
+            packages = builder.build_releases(output, [skill])
+            before = {path: path.read_bytes() for path in packages}
+            with patch.object(builder, 'framework_zip', side_effect=OSError('test packaging failure')), self.assertRaises(OSError):
+                builder.build_releases(output, [skill], overwrite=True)
+            self.assertEqual({path: path.read_bytes() for path in packages}, before)
+            self.assertFalse(list(output.glob('.release-*')))
+            separate = directory / 'framework-only'
+            with patch.object(sys, 'argv', ['build_release.py', '--framework-only', '--output-dir', str(separate)]), \
+                    patch.object(sys, 'stdout', io.StringIO()):
+                builder.main()
+            self.assertEqual([path.name for path in separate.iterdir()], [f'primebuddy-{__version__}.rpk'])
+            with zipfile.ZipFile(separate / f'primebuddy-{__version__}.rpk') as package:
+                self.assertFalse(any(name.startswith('primebuddy/resource/bundled/') for name in package.namelist()))
+
     def test_installer_reuses_system_yaml_without_pip(self):
         installer = self.installer()
         with patch.object(installer.subprocess, 'run') as run:
@@ -424,8 +509,7 @@ class ReleaseTests(unittest.TestCase):
             directory = Path(temp)
             old = zip_skill(make_skill(directory / 'old', setup="return {'keep': 1}"), directory / 'old.zip')
             new = make_skill(directory / 'new', setup="return dict(config, revision=2)", version='0.2.0')
-            archive = directory / 'release.zip'
-            builder.build(archive, [new])
+            archive = builder.build_releases(directory / 'release', [new])[0]
             with zipfile.ZipFile(archive) as package:
                 package.extractall(directory / 'unpacked')
             env = dict(os.environ, PRIMEBUDDY_HOME=str(directory / 'data'),
@@ -470,14 +554,13 @@ print('BUNDLE_UPGRADE_OK')
             skill = make_skill(directory / 'hello')
             # 私有文件即使误放在项目根目录，也不会进入发布清单。
             (skill / 'credential.json').write_text('do-not-ship')
-            archive = directory / 'release.zip'
-            builder.build(archive, [skill])
+            archive = builder.build_releases(directory / 'release', [skill])[0]
             with zipfile.ZipFile(archive) as package:
                 package.extractall(directory / 'unpacked')
                 self.assertEqual({name.split('/')[0] for name in package.namelist()}, {'primebuddy'})
-                self.assertIn('primebuddy/resource/bundled/hello.zip', package.namelist())
+                self.assertIn('primebuddy/resource/bundled/hello-0.1.0.rpk', package.namelist())
                 self.assertIn('primebuddy/README.md', package.namelist())
-                bundled = io.BytesIO(package.read('primebuddy/resource/bundled/hello.zip'))
+                bundled = io.BytesIO(package.read('primebuddy/resource/bundled/hello-0.1.0.rpk'))
             with zipfile.ZipFile(bundled) as package:
                 self.assertNotIn('credential.json', package.namelist())
             prefix = directory / 'install with space'
@@ -504,7 +587,7 @@ print('BUNDLE_UPGRADE_OK')
             result = subprocess.run([launcher, '--version'], env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('PrimeBuddy ' + __version__, result.stdout)
-            result = subprocess.run([launcher, 'skill', 'install', str((prefix / 'resource/bundled/hello.zip').relative_to(directory)), '--no-configure'],
+            result = subprocess.run([launcher, 'skill', 'install', str((prefix / 'resource/bundled/hello-0.1.0.rpk').relative_to(directory)), '--no-configure'],
                                     cwd=directory, env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(read_config(prefix / 'cfg/skills.yaml')['hello']['ready'])
@@ -616,10 +699,10 @@ print('BUNDLE_UPGRADE_OK')
             installer.write_atomic(home / 'cfg/providers.yaml', 'api_key: do-not-ship\n', 0o600)
             installer.write_atomic(home / 'cfg/skills/hello/config.yaml', 'secret: do-not-ship\n', 0o600)
             installer.write_atomic(home / 'data/hello/token', 'do-not-ship', 0o600)
-            output = home.parent / 'release.zip'
+            output = home.parent / 'release'
             with patch.object(build_release, 'ROOT', home):
-                build_release.build(output, [])
-            with zipfile.ZipFile(output) as package:
+                archive = build_release.build_releases(output, [])[0]
+            with zipfile.ZipFile(archive) as package:
                 names = package.namelist()
                 self.assertIn('primebuddy/cfg/config.example.yaml', names)
                 self.assertIn('primebuddy/cfg/providers.example.yaml', names)
@@ -636,9 +719,8 @@ print('BUNDLE_UPGRADE_OK')
             directory = Path(temp)
             source = directory / 'source'
             installer.stage_application(ROOT, source)
-            archive = directory / 'release.zip'
             with patch.object(build_release, 'ROOT', source):
-                build_release.build(archive, [make_skill(directory / 'hello')])
+                archive = build_release.build_releases(directory / 'release', [make_skill(directory / 'hello')])[0]
             with zipfile.ZipFile(archive) as package:
                 self.assertFalse(any(name.startswith('primebuddy/docs/') for name in package.namelist()))
                 package.extractall(directory / 'unpacked')
@@ -647,7 +729,7 @@ print('BUNDLE_UPGRADE_OK')
             with patch.object(installer, '__file__', str(app / 'src/primebuddy/tools/install.py')):
                 launcher = installer.install(home)
             self.assertFalse((home / 'docs').exists())
-            self.assertTrue((home / 'resource/bundled/hello.zip').is_file())
+            self.assertTrue((home / 'resource/bundled/hello-0.1.0.rpk').is_file())
             result = subprocess.run([str(launcher), '--version'], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('PrimeBuddy ' + __version__, result.stdout)
