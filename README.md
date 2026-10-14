@@ -74,6 +74,145 @@ primebuddy skill install /tmp/diangetai-skill.zip --replace
 
 无需配置的技能安装后直接可用。声明了配置步骤的技能可使用 `--no-configure` 暂缓，稍后运行 `skill configure`；配置既可以是技能自己的 Console 脚本，也可以是可选 UI 向导。升级失败保留已有版本，重新配置中断标记待配置。直接复制的技能也能使用管理命令，变更后重启会话生效。
 
+## 开发一个 skill
+
+普通 skill 最少只需要 `SKILL.md`，无需额外 Python 依赖、平台基类或五个契约函数。需要执行代码时添加普通脚本；需要配置、包元信息或共享机器人音频时再增加相应声明。以下命令从框架源码目录执行，示例技能放在相邻的 `my-skills/hello/`。
+
+1. **建立技能目录，写清能力和触发条件。** 最小结构为：
+
+   ```text
+   my-skills/hello/
+   └── SKILL.md
+   ```
+
+   `SKILL.md` 示例：
+
+   ```markdown
+   ---
+   name: hello
+   description: 用户要求向某个人问好时使用。
+   metadata:
+     version: "0.1.0"
+   ---
+
+   没有提供名字时，先询问名字。
+   用户提供名字后，用一句简短中文问候。
+   ```
+
+   `name` 使用小写字母、数字和单连字符，最多 64 字符；`description` 写明用途和何时使用。版本为可选项，不提供时使用 `0.0.0`。纯规则或说明类技能到这里就可以安装。
+
+2. **需要业务操作时添加普通脚本。** 例如增加 `src/greet.py`：
+
+   ```python
+   import argparse
+
+   parser = argparse.ArgumentParser()
+   parser.add_argument('name')
+   args = parser.parse_args()
+   print('你好，' + args.name)
+   ```
+
+   将 `SKILL.md` 正文改为：
+
+   ```text
+   没有提供名字时，先询问名字。
+   运行 src/greet.py，将名字作为一个命令行参数。
+   根据脚本的实际输出回复用户。
+   ```
+
+   脚本不必导入 PrimeBuddy。支持 Python、Bash 和 JavaScript；打印文本即可，也可以输出包含 `status`、`message` 的 JSON 对象。非零退出码表示失败。业务脚本运行时不能交互读取输入，交互配置应放到下一步的配置入口。
+
+3. **按业务需要声明依赖和配置。** 只用标准库时可省略 `requirements.txt`；需要第三方 Python 库时使用 `包名==固定版本`，安装器会安装到该技能的 `_deps/`。普通技能不必创建 `main.py` 或 `cfg/pkg.yaml`，配置、资源和主要测试按需要分别放在 `cfg`、`resource`、`tests`。
+
+   需要安装时自动显示配置向导的技能，可在 `cfg/pkg.yaml` 声明：
+
+   ```yaml
+   primebuddy:
+     setup: src/setup.py
+   ```
+
+   例如，一个需要设备地址的技能可以在 `src/setup.py` 实现：
+
+   ```python
+   def setup(ui, data_dir, config):
+       address = ui.ask('设备地址', config.get('device_address', ''))
+       return {**config, 'device_address': address}
+   ```
+
+   `skill install` 安装文件和依赖后调用这个函数，框架保存返回的字典到 `~/.primebuddy/cfg/skills/<name>/config.yaml`，配置完成后启用技能。`ui` 提供 `ask`、`confirm`、`choose` 等终端控件，`data_dir` 用于技能私有数据，`config` 是已有配置。仅放一个 `setup.py` 文件不会自动调用，必须声明入口。
+
+   已有交互脚本也可以用 Console 配置入口：
+
+   ```yaml
+   primebuddy:
+     configure: [src/configure.py]
+   ```
+
+   `configure` 与 `setup` 二选一。Console 脚本自行保存配置，正常退出表示配置完成；框架通过 `PRIMEBUDDY_SKILL_CONFIG`、`PRIMEBUDDY_SKILL_DATA` 传入私有配置文件和数据目录路径。私有 YAML 文件权限为 600，账号和登录态不要写入源码配置或发布包。
+
+4. **先验证业务，再安装和检查发现结果。** 对上述脚本直接执行：
+
+   ```bash
+   python3 ../my-skills/hello/src/greet.py 张三
+   primebuddy skill install ../my-skills/hello
+   primebuddy skill list
+   primebuddy skill catalog
+   ```
+
+   保留主要成功、错误输入和业务失败的测试；涉及长任务时还要验证取消与清理。已配置 LLM 后，可以用下面的命令校验模型是否选择技能、读取说明并生成任务；它会调用云端，模拟时不会执行脚本或控制设备：
+
+   ```bash
+   primebuddy simulate --skills-dir ../my-skills --text "向张三问好"
+   ```
+
+5. **需要时重新配置或替换版本。** 首次安装希望暂缓配置时，用 `--no-configure` 替代上一步的安装命令，稍后继续：
+
+   ```bash
+   primebuddy skill install ../my-skills/hello --no-configure
+   primebuddy skill configure hello
+   ```
+
+   已有技能直接运行 `skill configure hello`。更新已有代码使用：
+
+   ```bash
+   primebuddy skill install ../my-skills/hello --replace
+   ```
+
+   安装、修改或配置后重启框架会话，重新建立技能注册表。
+
+6. **发布时打包单个技能。** 输出路径应使用尚不存在的 ZIP 文件名：
+
+   ```bash
+   python3 src/primebuddy/tools/build_release.py \
+     --skill-only ../my-skills/hello \
+     --output /tmp/hello-skill-0.1.0.zip
+   primebuddy skill install /tmp/hello-skill-0.1.0.zip
+   ```
+
+   ZIP 可在另一台已安装 PrimeBuddy 的机器上使用；本机已有同名技能时安装命令加 `--replace`。
+
+需要共享 `context.audio`、取消控制或调度资源时，再使用可选原生工具适配。例如在 `cfg/pkg.yaml` 声明：
+
+```yaml
+primebuddy:
+  entrypoint: src/actions.py
+  actions:
+    greet:
+      parameters:
+        name: {type: string}
+      resources: []
+```
+
+`src/actions.py` 只需提供具名业务函数：
+
+```python
+def greet(context, name):
+    context.checkpoint()
+    return '你好，' + name
+```
+
+框架用 `greet(context=context, name=...)` 调用。`validate`、`preflight`、`describe` 等额外钩子按实际需要提供。点歌台和易来采用这一适配方式；普通脚本技能使用前面的步骤即可。包版本、作者和描述等元信息可按启元风格写入 `cfg/pkg.yaml`，`package_name` 须与 `SKILL.md` 的 `name` 一致；`sdk_version` 是开发参考，不会要求每个技能安装机器人 SDK。
+
 ## 命令
 
 | 命令 | 用途 |
