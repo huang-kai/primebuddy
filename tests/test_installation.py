@@ -399,7 +399,19 @@ class ReleaseTests(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
-    def test_default_cli_builds_versioned_rpks_and_reuses_bundled_skill_bytes(self):
+    def test_cli_without_arguments_prints_help_without_building(self):
+        from primebuddy.tools import build_release as builder
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / 'primebuddy'
+            with patch.object(builder, 'ROOT', source), \
+                    patch.object(sys, 'argv', ['build_release.py']), \
+                    patch.object(sys, 'stdout', io.StringIO()) as stdout:
+                builder.main()
+            self.assertIn('--framework', stdout.getvalue())
+            self.assertIn('--skill', stdout.getvalue())
+            self.assertFalse(source.exists())
+
+    def test_explicit_cli_builds_versioned_rpks_and_only_bundles_selected_skills(self):
         from primebuddy.tools import build_release as builder
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)
@@ -408,6 +420,7 @@ class ReleaseTests(unittest.TestCase):
             collection = directory / 'primebuddy-skills'
             make_skill(collection / 'hello')
             make_skill(collection / 'other', version='0.2.0', name='other')
+            make_skill(collection / 'unselected', name='unselected')
             (source / 'docs').mkdir()
             (source / 'docs/private.md').write_text('do-not-ship')
             old_bundle = source / 'resource/bundled/obsolete.zip'
@@ -415,7 +428,9 @@ class ReleaseTests(unittest.TestCase):
             old_bundle.write_bytes(b'old package must not be copied')
             output = directory / 'release'
             with patch.object(builder, 'ROOT', source), \
-                    patch.object(sys, 'argv', ['build_release.py', '--output-dir', str(output)]), \
+                    patch.object(sys, 'argv', ['build_release.py', '--framework',
+                        '--skill', str(collection / 'hello'), '--skill', str(collection / 'other'),
+                        '--output-dir', str(output)]), \
                     patch.object(sys, 'stdout', io.StringIO()):
                 builder.main()
             names = {path.name for path in output.iterdir()}
@@ -426,7 +441,8 @@ class ReleaseTests(unittest.TestCase):
                     self.assertIsNone(package.testzip())
                     self.assertFalse(any('docs' in Path(name).parts for name in package.namelist()))
             with zipfile.ZipFile(output / f'primebuddy-{__version__}.rpk') as framework:
-                self.assertNotIn('primebuddy/resource/bundled/obsolete.zip', framework.namelist())
+                self.assertEqual({name for name in framework.namelist() if name.startswith('primebuddy/resource/bundled/')},
+                    {'primebuddy/resource/bundled/hello-0.1.0.rpk', 'primebuddy/resource/bundled/other-0.2.0.rpk'})
                 for filename in ('hello-0.1.0.rpk', 'other-0.2.0.rpk'):
                     self.assertEqual(framework.read('primebuddy/resource/bundled/' + filename), (output / filename).read_bytes())
 
@@ -436,8 +452,9 @@ class ReleaseTests(unittest.TestCase):
             directory = Path(temp)
             skill = make_skill(directory / 'hello')
             output = directory / 'release'
-            arguments = ['build_release.py', '--skill-only', str(skill), '--output-dir', str(output)]
-            with patch.object(sys, 'argv', arguments), patch.object(sys, 'stdout', io.StringIO()):
+            arguments = ['build_release.py', '--skill', str(skill), '--output-dir', str(output)]
+            with patch.object(builder, 'ROOT', directory / 'framework-without-skills'), \
+                    patch.object(sys, 'argv', arguments), patch.object(sys, 'stdout', io.StringIO()):
                 builder.main()
             archive = output / 'hello-0.1.0.rpk'
             before = archive.read_bytes()
@@ -452,7 +469,7 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(package.read('README.md').decode(), 'updated package')
             self.assertEqual([path.name for path in output.iterdir()], ['hello-0.1.0.rpk'])
 
-    def test_failed_rebuild_keeps_existing_packages_and_framework_only_has_no_skills(self):
+    def test_failed_rebuild_keeps_existing_packages_and_framework_without_selected_skills_has_no_bundles(self):
         from primebuddy.tools import build_release as builder
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)
@@ -465,7 +482,7 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual({path: path.read_bytes() for path in packages}, before)
             self.assertFalse(list(output.glob('.release-*')))
             separate = directory / 'framework-only'
-            with patch.object(sys, 'argv', ['build_release.py', '--framework-only', '--output-dir', str(separate)]), \
+            with patch.object(sys, 'argv', ['build_release.py', '--framework', '--output-dir', str(separate)]), \
                     patch.object(sys, 'stdout', io.StringIO()):
                 builder.main()
             self.assertEqual([path.name for path in separate.iterdir()], [f'primebuddy-{__version__}.rpk'])

@@ -48,11 +48,6 @@ def framework_zip(output, bundles):
             archive.write(path, 'primebuddy/resource/bundled/' + path.name)
 
 
-def default_skills():
-    directory = ROOT.parent / 'primebuddy-skills'
-    return [path for path in sorted(directory.iterdir()) if path.is_dir() and (path / 'SKILL.md').is_file()] if directory.is_dir() else []
-
-
 def build_releases(output_dir, skills, framework=True, overwrite=False):
     metadata = [load_skill_metadata(source) for source in skills]
     if len({data['name'] for data in metadata}) != len(metadata):
@@ -94,17 +89,15 @@ def build_releases(output_dir, skills, framework=True, overwrite=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'dist', help='输出目录，默认框架 dist；文件名自动生成')
-    parser.add_argument('--skill', type=Path, action='append', help='选择技能目录，可重复；默认打包相邻 primebuddy-skills 中的所有技能')
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument('--skill-only', type=Path, help='只打包一个独立技能')
-    mode.add_argument('--framework-only', action='store_true', help='只打包框架，不附带技能')
+    parser.add_argument('--framework', action='store_true', help='打包框架；只有指定 --skill 时才附带技能')
+    parser.add_argument('--skill', type=Path, action='append', help='打包指定技能源码目录，可重复；与 --framework 同用时放入框架包')
     parser.add_argument('--overwrite', action='store_true', help='替换输出目录中已有的同版本 RPK')
     args = parser.parse_args()
-    if args.skill and (args.skill_only or args.framework_only):
-        parser.error('--skill 不能与 --skill-only 或 --framework-only 同用')
+    if not args.framework and not args.skill:
+        parser.print_help()
+        return
     try:
-        skills = [args.skill_only] if args.skill_only else ([] if args.framework_only else args.skill or default_skills())
-        outputs = build_releases(args.output_dir, skills, framework=not args.skill_only, overwrite=args.overwrite)
+        outputs = build_releases(args.output_dir, args.skill or [], framework=args.framework, overwrite=args.overwrite)
     except (OSError, ValueError) as error:
         parser.exit(1, str(error) + '\n')
     for path in outputs:

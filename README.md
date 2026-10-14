@@ -53,7 +53,7 @@ primebuddy skill install ../primebuddy-skills/diangetai
 工作区的两个 skill 在相邻的 `primebuddy-skills` 中。从当前工作内容生成技能包：
 
 ```bash
-python3 src/primebuddy/tools/build_release.py --skill-only ../primebuddy-skills/diangetai --output-dir /tmp/releases
+python3 src/primebuddy/tools/build_release.py --skill ../primebuddy-skills/diangetai --output-dir /tmp/releases
 primebuddy skill install /tmp/releases/diangetai-0.3.0.rpk
 ```
 
@@ -76,34 +76,41 @@ primebuddy skill install /tmp/releases/diangetai-0.3.0.rpk --replace
 
 ## 打包发布（RPK）
 
-在框架源码目录运行：
+在框架源码目录运行，不带参数时显示使用方法，不生成文件：
 
 ```bash
 python3 src/primebuddy/tools/build_release.py
 ```
 
-默认打包框架及相邻 `primebuddy-skills` 集合中的所有 skill，分别生成独立发布包：
+显式选择要打包的项目，`--skill` 只接受技能源码目录，可重复指定：
 
-```text
-dist/
-├── primebuddy-1.0.0.rpk
-├── diangetai-0.3.0.rpk
-└── yeelight-0.2.0.rpk
+```bash
+# 只打框架，不附带技能
+python3 src/primebuddy/tools/build_release.py --framework
+
+# 只打点歌台，不需要其他技能源码
+python3 src/primebuddy/tools/build_release.py --skill ../primebuddy-skills/diangetai
+
+# 框架内附带点歌台
+python3 src/primebuddy/tools/build_release.py --framework --skill ../primebuddy-skills/diangetai
+
+# 每个 --skill 指定一个放入框架包的技能
+python3 src/primebuddy/tools/build_release.py --framework \
+  --skill ../primebuddy-skills/diangetai \
+  --skill ../primebuddy-skills/yeelight
 ```
 
 文件名自动使用 `项目名-版本号.rpk`。框架版本读取 `src/primebuddy/__init__.py` 的 `__version__`；skill 名称和版本读取 `SKILL.md`、`cfg/pkg.yaml`，普通 skill 也可只用 `SKILL.md` 的 `metadata.version`。输出文件先生成 ZIP，再改为 `.rpk`，内容仍为 ZIP 格式，用于准备启元 SkillHub 发布包。
 
-框架包内继续包含本次生成的 skill RPK，放在 `resource/bundled/`，安装向导可以选择它们；同一份 skill 包也单独输出用于发布。打包不会混入旧的随包版本，开发文档、测试目录、账号登录态、实际框架配置和运行数据不进入发布包。
+默认输出目录为框架 `dist/`。`--framework` 生成 `primebuddy-1.0.0.rpk`；`--skill` 生成指定技能的独立 RPK，例如 `diangetai-0.3.0.rpk`。两者同用时，指定技能的 RPK 还会放入框架包的 `resource/bundled/`，安装向导可以选择它们。框架不自动附带任何技能，也不扫描相邻技能集合。打包不会混入旧的随包版本，开发文档、测试目录、账号登录态、实际框架配置和运行数据不进入发布包。
 
-仅打框架、仅打某个 skill 或指定输出目录：
+指定输出目录：
 
 ```bash
-python3 src/primebuddy/tools/build_release.py --framework-only
-python3 src/primebuddy/tools/build_release.py --skill-only ../primebuddy-skills/diangetai
-python3 src/primebuddy/tools/build_release.py --output-dir /tmp/releases
+python3 src/primebuddy/tools/build_release.py --framework --output-dir /tmp/releases
 ```
 
-`--skill PATH` 可重复指定本次一起打包的技能。默认保留已有同名发布包；需要重新生成同版本包时加 `--overwrite`，或先更新项目版本。原来的 `--output 文件名` 改为 `--output-dir 目录`，无需手工填写名称或改后缀。
+已有 RPK 直接用于安装或发布，不需要重新打包。默认保留已有同名发布包；修改源码后需要重新生成同版本包时加 `--overwrite`，或先更新项目版本。原来的 `--output 文件名` 改为 `--output-dir 目录`，无需手工填写名称或改后缀。
 
 RPK 可以用普通 ZIP 工具解压；框架包的安装方式为：
 
@@ -225,7 +232,7 @@ skill 包可直接使用 `primebuddy skill install dist/diangetai-0.3.0.rpk`，H
 
    ```bash
    python3 src/primebuddy/tools/build_release.py \
-     --skill-only ../my-skills/hello \
+     --skill ../my-skills/hello \
      --output-dir /tmp/releases
    primebuddy skill install /tmp/releases/hello-0.1.0.rpk
    ```
