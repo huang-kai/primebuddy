@@ -1,4 +1,4 @@
-"""跨板连接残留的回归测试；用真实 Unix socket，不连接机器人。"""
+"""跨板连接、互斥与空闲音频边界。"""
 import contextlib
 import io
 from pathlib import Path
@@ -7,8 +7,11 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
-
-from primebuddy.voice_support.robot_audio import AudioError, connect_soc0
+from primebuddy.integrations.t1.robot_audio import AudioError, connect_soc0
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+import wave
+from primebuddy.integrations.t1.robot_audio import AudioError, RobotAudio
 
 
 class ConnectionTests(unittest.TestCase):
@@ -17,7 +20,7 @@ class ConnectionTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.runtime = Path(self.temp.name)
         self.path = self.runtime / 'soc0.sock'
-        self.jetson = patch('primebuddy.voice_support.robot_audio.require_jetson')
+        self.jetson = patch('primebuddy.integrations.t1.robot_audio.require_jetson')
         self.jetson.start()
         self.addCleanup(self.jetson.stop)
 
@@ -27,7 +30,7 @@ class ConnectionTests(unittest.TestCase):
                 start()
             return subprocess.CompletedProcess(args, next(values))
         values = iter(codes)
-        with patch('primebuddy.voice_support.robot_audio.subprocess.run', side_effect=run) as call:
+        with patch('primebuddy.integrations.t1.robot_audio.subprocess.run', side_effect=run) as call:
             connect_soc0(self.runtime)
         return call
 
@@ -68,35 +71,101 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(target.read_text(), 'keep')
 
     def test_authentication_failure_has_actionable_message(self):
-        with patch('primebuddy.voice_support.robot_audio.subprocess.run', side_effect=[
+        with patch('primebuddy.integrations.t1.robot_audio.subprocess.run', side_effect=[
                 subprocess.CompletedProcess([], 255), subprocess.CalledProcessError(255, 'ssh')]):
             with self.assertRaisesRegex(AudioError, 'SSH 登录失败'):
                 connect_soc0(self.runtime)
 
     def test_cli_shows_safe_audio_error(self):
-        from primebuddy.__main__ import main
+        from primebuddy.cli.commands import main
         output = io.StringIO()
-        with patch('sys.argv', ['primebuddy']), \
-                patch('primebuddy.__main__.run', side_effect=AudioError('跨板 SSH 未连接')), \
+        with patch('sys.argv', ['primebuddy']),\
+                patch('primebuddy.cli.commands.dispatch_command', side_effect=AudioError('跨板 SSH 未连接')),\
                 contextlib.redirect_stderr(output):
             self.assertEqual(main(), 1)
         self.assertIn('跨板 SSH 未连接', output.getvalue())
 
     def test_failed_preflight_names_component_and_does_not_take_over_agent(self):
-        from primebuddy.voice import serve
+        from primebuddy.voice.session import serve
         registry, context, robot = Mock(), Mock(), Mock()
         robot.check.return_value = dict(play_service=True, stop_service=False, soc0_ssh_connected=False)
         registry.planning_context.return_value = {'skills': []}
         with contextlib.ExitStack() as stack:
-            stack.enter_context(patch('primebuddy.voice_support.runtime.private_runtime', return_value=self.runtime))
+            stack.enter_context(patch('primebuddy.config.runtime.private_runtime', return_value=self.runtime))
             for name in ('connect_soc0',):
-                stack.enter_context(patch('primebuddy.voice_support.robot_audio.' + name))
-            stack.enter_context(patch('primebuddy.voice_support.speech_audio.native_preflight'))
-            stack.enter_context(patch('primebuddy.voice_support.qwen_asr.load_config'))
-            stack.enter_context(patch('primebuddy.voice.vocabulary', return_value=[]))
-            stack.enter_context(patch('primebuddy.voice_support.robot_audio.audio_session',
+                stack.enter_context(patch('primebuddy.integrations.t1.robot_audio.' + name))
+            stack.enter_context(patch('primebuddy.integrations.t1.speech_audio.native_preflight'))
+            stack.enter_context(patch('primebuddy.config.models.load_model', return_value={
+                'provider': 'qianwen', 'model': 'test-only', 'endpoint': 'https://example.invalid', 'voice': 'test-only'}))
+            stack.enter_context(patch('primebuddy.voice.session.vocabulary', return_value=[]))
+            stack.enter_context(patch('primebuddy.integrations.t1.robot_audio.audio_session',
                                       return_value=contextlib.nullcontext(robot)))
-            agent = stack.enter_context(patch('primebuddy.voice_support.native_agent.voice_only_agent'))
+            agent = stack.enter_context(patch('primebuddy.integrations.t1.native_agent.voice_only_agent'))
             with self.assertRaisesRegex(AudioError, '停止播放服务.*跨板 SSH'):
                 serve(registry, context)
             agent.assert_not_called()
+
+    def test_native_preflight_checks_each_selected_model_and_vendor_message_fields(self):
+        import sys
+        from primebuddy.integrations.t1.speech_audio import native_preflight
+        from primebuddy.providers.errors import AsrError
+        fields = {'header', 'stream_id', 'audio_vad_state', 'audio_data'}
+        audio = SimpleNamespace(get_fields_and_field_types=lambda: fields)
+        state = SimpleNamespace(get_fields_and_field_types=lambda: {'main_state'})
+        with patch('primebuddy.integrations.t1.speech_audio.require_jetson'), \
+                patch('primebuddy.integrations.t1.speech_audio.load_model', side_effect=lambda role: {'provider': role, 'model': 'test-only'}) as load, \
+                patch.dict(sys.modules, {'aimdk_msgs.msg': SimpleNamespace(ProcessedAudioOutput=audio, AgentConversationState=state)}):
+            self.assertEqual(native_preflight()['cloud'], {
+                'asr': 'asr:test-only', 'llm': 'llm:test-only', 'tts': 'tts:test-only'})
+            self.assertEqual([call.args[0] for call in load.call_args_list], ['asr', 'llm', 'tts'])
+            fields.remove('audio_data')
+            with self.assertRaises(AsrError):
+                native_preflight()
+
+
+class AudioIdleTests(unittest.TestCase):
+    def start(self, finish_at, cancel=False):
+        robot = object.__new__(RobotAudio)
+        robot.node = Mock()
+        robot.play_client = Mock()
+        robot.call = Mock()
+        robot.playback_events = []
+        now = [0.0]
+
+        def spin():
+            now[0] += .25
+            state = 2 if finish_at is not None and now[0] >= finish_at else 1
+            robot.playback_events.append((now[0], 'vendor', state))
+
+        def checkpoint():
+            if cancel and now[0] >= 2:
+                raise InterruptedError('cancelled')
+
+        robot.spin = spin
+        self.robot, self.now = robot, now
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'test.wav'
+            with wave.open(str(path), 'wb') as wav:
+                wav.setparams((1, 2, 24000, 0, 'NONE', 'not compressed'))
+                wav.writeframes(b'\0' * 48000)
+            with patch.dict('sys.modules', {'aimdk_msgs.srv': SimpleNamespace(
+                    PlayAudioFile=SimpleNamespace(Request=Mock))}),\
+                    patch('primebuddy.integrations.t1.robot_audio.time.monotonic', side_effect=lambda: now[0]):
+                robot.start_file(path, Path('/tmp/test.wav'), checkpoint)
+
+    def test_waits_for_vendor_sound_to_finish_before_submitting(self):
+        self.start(finish_at=3)
+        self.assertGreaterEqual(self.now[0], 3)
+        self.robot.call.assert_called_once()
+
+    def test_busy_timeout_never_submits_or_stops_other_audio(self):
+        with self.assertRaisesRegex(AudioError, '其他音频正在播放'):
+            self.start(finish_at=None)
+        self.assertGreaterEqual(self.now[0], 8)
+        self.assertLess(self.now[0], 9)
+        self.robot.call.assert_not_called()
+
+    def test_wait_can_be_cancelled_without_submitting(self):
+        with self.assertRaises(InterruptedError):
+            self.start(finish_at=None, cancel=True)
+        self.robot.call.assert_not_called()

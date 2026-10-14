@@ -1,0 +1,16 @@
+asr:
+  model: qianwen:qwen3-asr-flash
+llm:
+  model: qianwen:qwen-plus
+tts:
+  model: qianwen:qwen-audio-3.0-tts-plus
+  tts_voice: longanlingxin
+runtime:
+  directory: runtime
+logging:
+  directory: /var/log/primebuddy
+  level: INFO
+  max_bytes: 10485760
+  backup_count: 5
+voice:
+  speech_cache_entries: 128

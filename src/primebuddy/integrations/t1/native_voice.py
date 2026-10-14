@@ -1,0 +1,192 @@
+"""接收原厂处理后音频；只在点歌窗口把完整 VAD 片段交给自有 ASR。"""
+import queue
+import json
+import logging
+import threading
+import time
+
+from primebuddy.integrations.t1.robot_audio import AudioError
+from primebuddy.core.timing import progress
+
+logger = logging.getLogger(__name__)
+
+AUDIO_TOPIC = '/agent/process_audio_output'
+STATE_TOPIC = '/aima/agent/interaction_state'
+
+
+def trace(event, **fields):
+    logger.info('VOICE_TRACE %s', json.dumps({'at': round(time.monotonic(), 3), 'event': event, **fields}))
+
+
+class NativeVoiceInput:
+    def __init__(self, runtime, robot):
+        self.robot = robot
+        self.events = queue.Queue(maxsize=16)
+        self.ready = threading.Event()
+        self.closed = threading.Event()
+        self.generation = 0
+        self.error = None
+        self.subscriptions = []
+        self.phase = 'muted'
+        self.deadline = 0
+        self.opened_at_ns = 0
+        self.buffer = None
+        self.started_at = 0
+        self.last_packet_at = 0
+        self.conversation_state = None
+        self.last_health_check = 0
+        self.window_packets = 0
+        self.window_stream_packets = 0
+        self.window_stale_packets = 0
+
+    def current(self, generation):
+        return not self.closed.is_set() and generation == self.generation
+
+    def emit(self, kind, value=None):
+        try:
+            self.events.put_nowait((self.generation, kind, value))
+        except queue.Full:
+            self.error = AudioError('原厂语音事件积压，技能将退出。')
+
+    def listen(self, generation):
+        if self.current(generation):
+            self.phase = 'listening'
+            self.buffer = None
+            self.deadline = time.monotonic() + 30
+            self.opened_at_ns = self.robot.node.get_clock().now().nanoseconds
+            self.window_packets = self.window_stream_packets = self.window_stale_packets = 0
+            trace('listen_window_open', seconds=30, native_state=self.conversation_state)
+
+    def idle(self, generation):
+        if self.current(generation):
+            self.phase = 'muted'
+            self.buffer = None
+
+    def wait_for_wake(self, generation):
+        if self.current(generation):
+            self.phase = 'waiting'
+            self.buffer = None
+
+    def on_state(self, msg):
+        if self.closed.is_set() or self.error is not None:
+            return
+        state = int(msg.main_state.value)
+        previous, self.conversation_state = self.conversation_state, state
+        if state != previous:
+            trace('native_state', previous=previous, state=state, phase=self.phase)
+        # 首帧与重复 LISTENING 不是新的会话；不把 VAD BEGIN 当作唤醒。
+        # 本机枚举 LISTENING=1，状态转入监听与双唤醒词的对应仍需实机验证。
+        if self.phase == 'waiting' and previous is not None and previous != 1 and state == 1:
+            self.listen(self.generation)
+            self.emit('wake')
+
+    def on_audio(self, msg):
+        if self.closed.is_set() or self.error is not None:
+            return
+        try:
+            if self.phase == 'listening':
+                self.window_packets += 1
+            # 本台 T1 实测内置流为0，不能套用 X2 文档的1或混合多路音频。
+            if int(msg.stream_id) != 0:
+                return
+            state = int(msg.audio_vad_state.value)
+            if state in (1, 3):
+                trace('vad_boundary', vad=state, phase=self.phase)
+            if self.phase != 'listening':
+                return
+            self.window_stream_packets += 1
+            stamp = msg.header.stamp
+            timestamp = stamp.sec * 1_000_000_000 + stamp.nanosec
+            if timestamp and timestamp < self.opened_at_ns:
+                self.window_stale_packets += 1
+                if state in (1, 3):
+                    trace('discard_stale', vad=state, before_window_ms=round((self.opened_at_ns - timestamp) / 1e6, 1))
+                return
+            state = int(msg.audio_vad_state.value)
+            pcm = bytes(msg.audio_data)
+            if state not in (0, 1, 2, 3) or len(pcm) % 2:
+                raise AudioError('原厂 VAD 音频格式不符合 PCM16 协议。')
+            now = time.monotonic()
+            if state == 0:
+                self.buffer = None
+                return
+            if state == 1:
+                self.buffer = bytearray()
+                self.started_at = now
+            if self.buffer is None:
+                # 丢失 BEGIN 的片段不拼接到下一句，也不发送残句给 ASR。
+                if state == 3:
+                    trace('discard_missing_begin')
+                return
+            self.buffer.extend(pcm)
+            self.last_packet_at = now
+            if len(self.buffer) > 16000 * 2 * 15:
+                self.timeout('原厂语音超过15秒，已丢弃，未提交截断音频。')
+            elif state == 3:
+                answer = bytes(self.buffer)
+                self.buffer = None
+                if len(answer) >= 16000 * 2 * .2:
+                    trace('utterance', seconds=round(len(answer) / 32000, 3))
+                    self.phase = 'muted'
+                    self.emit('utterance', answer)
+        except Exception as error:
+            self.error = error if isinstance(error, AudioError) else AudioError('原厂音频接收失败。')
+
+    def timeout(self, reason=None):
+        if reason is None:
+            # 没有完整语句不等于用户没说话；区分前端无数据和本地丢帧。
+            if self.window_packets == 0:
+                reason = '未收到原厂音频，请重新说“元仔元仔”唤醒后再试。'
+            elif self.window_stream_packets == 0:
+                reason = '未收到本体麦克风流，只有其他音频流。'
+            elif self.window_stale_packets == self.window_stream_packets:
+                reason = '本体音频均早于监听窗口，请检查跨板时钟和音频延迟。'
+            else:
+                reason = '未收到完整 VAD 语句，请重新唤醒后再试。'
+        trace('timeout', reason=reason, phase=self.phase, native_state=self.conversation_state,
+              packets=self.window_packets, body_packets=self.window_stream_packets,
+              stale_packets=self.window_stale_packets)
+        self.buffer = None
+        self.phase = 'muted'
+        self.emit('timeout', reason)
+
+    def check_health(self):
+        now = time.monotonic()
+        if self.phase == 'listening':
+            if self.buffer is not None:
+                if now - self.last_packet_at > 3 or now - self.started_at > 18:
+                    self.timeout('未收到原厂 VAD 结束帧，已丢弃未完成语音。')
+            elif now >= self.deadline:
+                self.timeout()
+        # 该话题不是连续流；安静时没有音频不能当成采集故障。
+        if self.ready.is_set() and now - self.last_health_check > 5:
+            self.last_health_check = now
+            if any(self.robot.node.count_publishers(topic) == 0 for topic in (AUDIO_TOPIC, STATE_TOPIC)):
+                self.error = AudioError('原厂语音或会话状态发布者已离线。')
+
+    def start(self):
+        from aimdk_msgs.msg import ProcessedAudioOutput, AgentConversationState, AgentConversationMainState
+        from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+        if AgentConversationMainState.LISTENING != 1:
+            raise AudioError('原厂会话状态枚举不匹配。')
+        qos = QoSProfile(depth=500, reliability=ReliabilityPolicy.BEST_EFFORT,
+                         durability=DurabilityPolicy.VOLATILE)
+        for msg_type, topic, callback in ((ProcessedAudioOutput, AUDIO_TOPIC, self.on_audio),
+                                           (AgentConversationState, STATE_TOPIC, self.on_state)):
+            self.subscriptions.append(self.robot.node.create_subscription(msg_type, topic, callback, qos))
+        deadline = time.monotonic() + 15
+        while any(self.robot.node.count_publishers(topic) == 0 for topic in (AUDIO_TOPIC, STATE_TOPIC)):
+            from primebuddy.integrations.t1.robot_audio import check_cancel
+            check_cancel()
+            if time.monotonic() >= deadline:
+                raise AudioError('原厂语音前端话题未就绪，未回退到原始麦克风。')
+            self.robot.spin()
+        self.ready.set()
+        progress('原厂语音订阅已就绪，等待完整 VAD 音频；ASR、LLM、TTS 使用千问。')
+
+    def close(self):
+        self.closed.set()
+        self.buffer = None
+        for subscription in self.subscriptions:
+            self.robot.node.destroy_subscription(subscription)
+        self.subscriptions.clear()

@@ -2,18 +2,25 @@ __pycache__/
 *.pyc
 .venv/
 dist/
-_deps/
 .env
-/primebuddy
-/env.sh
+# 测试录音仅保留在本地；不影响 resource 中的正式音频资源。
+/tests/**/*.m4a
+/tests/**/*.wav
+/tests/**/*.mp3
+/tests/**/*.flac
+/tests/**/*.ogg
+/tests/**/*.aac
+/tests/**/*.pcm
+/tests/**/*.opus
 .DS_Store
-.env.*
+/logs/
+/bin/
+/_deps/
+/skills/
 /data/
 /runtime/
-/logs/
-model.json
-credential.json
-# 实机部署与排查记录保留在本地。
-/docs/deployment-*.md
-/docs/latency-*.md
-/docs/voice-followup-diagnosis-*.md
+/install.lock
+/cfg/*.yaml
+!/cfg/*.example.yaml
+/cfg/skills/
+/docs
