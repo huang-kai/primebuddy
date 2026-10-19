@@ -1,15 +1,16 @@
-"""固定脚本和可选原生工具；模拟不启动脚本，取消等待业务清理。"""
+"""普通 CLI 与旧原生入口均在独立进程中执行；宿主监督期限和清理。"""
 import json
 import os
 from pathlib import Path
-import signal
-import subprocess
 import sys
 import tempfile
-import time
+import threading
 
-from primebuddy.config.storage import SetupError, application_directory, config_path, get_data_directory, skill_data
+from primebuddy.config.storage import (SetupError, application_directory, config_path,
+    get_data_directory, skill_data, private_dir, write_json)
 from primebuddy.skills.metadata import resolve_skill_file
+from primebuddy.skills.adapters import command_arguments
+from primebuddy.skills.processes import run_process
 
 
 def script_command(root, relative, arguments):
@@ -34,18 +35,69 @@ def skill_environment(root, name):
     return environment
 
 
-def stop_script(process):
-    # 脚本可在 SIGINT 的 finally 中清理；超时后终止整个子进程组。
-    for sig, timeout in ((signal.SIGINT, 3), (signal.SIGTERM, 2), (signal.SIGKILL, 2)):
-        if process.poll() is not None:
-            return
+def _runtime(context):
+    if context.runtime is not None:
+        return private_dir(context.runtime)
+    from primebuddy.config.runtime import runtime_directory
+    return private_dir(runtime_directory())
+
+
+def _process(skill, command, context, timeout=600, *, cleanup=False, stop_grace=None):
+    options = {'stop_grace': stop_grace} if stop_grace is not None else {}
+    try:
+        result = run_process(command, cwd=skill['root'], env=skill_environment(skill['root'], skill['name']),
+                             runtime=_runtime(context), cancelled=threading.Event() if cleanup else context.cancelled,
+                             timeout=timeout, owner_id=context.owner_id, task_id=context.task_id, **options)
+    except Exception as error:
+        if getattr(error, 'cleanup_confirmed', False) is True:
+            raise
+        result = None
+    if result is None or not result['cleanup_confirmed']:
+        from primebuddy.core.engine import CleanupUnconfirmed
         try:
-            os.killpg(process.pid, sig)
-            process.wait(timeout=timeout)
-        except ProcessLookupError:
-            return
-        except subprocess.TimeoutExpired:
-            continue
+            marker = private_dir(_runtime(context) / skill['name']) / 'cleanup-unconfirmed.json'
+            write_json(marker, {'resources': sorted({resource for action in skill['actions'].values()
+                                                   for resource in action['resources']})})
+        except OSError:
+            raise CleanupUnconfirmed('进程清理未确认，且无法保存隔离记录。') from None
+        raise CleanupUnconfirmed('技能进程清理未确认。')
+    return result
+
+
+def _finished(process):
+    return process['status'] == 'exited' and process['returncode'] == 0 and process['cleanup_confirmed']
+
+
+def _json_output(process):
+    try:
+        value = json.loads(process['stdout'])
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _result(process):
+    if not process['cleanup_confirmed']:
+        return {'status': 'failed', 'message': '技能进程清理未确认，相关资源已隔离。', 'cleanup_confirmed': False}
+    value = _json_output(process)
+    if process['status'] != 'exited':
+        messages = {'cancelled': '任务已取消。', 'timed_out': '任务超过硬执行期限，已终止。',
+                    'output_limit': '任务输出超过限额，已终止。'}
+        return {'status': 'failed', 'message': messages.get(process['status'], '技能执行未完成。'),
+                'termination_reason': process['status']}
+    if (value and value.get('status') in {'success', 'failed', 'auth_required', 'clarification_required'}
+            and isinstance(value.get('message'), str)):
+        if process['returncode'] and value['status'] == 'success':
+            return {'status': 'failed', 'message': '技能进程异常退出，业务结果未确认。',
+                    'termination_reason': 'abnormal_exit'}
+        if process['returncode']:
+            value['termination_reason'] = 'abnormal_exit'
+        return value
+    if process['returncode']:
+        return {'status': 'failed', 'message': '技能进程执行失败，退出码：' + str(process['returncode']),
+                'termination_reason': 'abnormal_exit'}
+    text = process['stdout'].strip()[:65536]
+    return {'status': 'success', 'message': text[:200] or '脚本执行完成。', 'output': text}
 
 
 def run_script(skill, args, context):
@@ -53,85 +105,188 @@ def run_script(skill, args, context):
     context.checkpoint()
     if context.simulate:
         return {'status': 'success', 'message': '模拟：未执行 ' + args['path'] + '。', 'simulated': True}
-    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
-        process = subprocess.Popen(command, cwd=skill['root'], env=skill_environment(skill['root'], skill['name']),
-                                   stdin=subprocess.DEVNULL, stdout=output, stderr=errors, start_new_session=True)
-        deadline = time.monotonic() + 600
-        try:
-            while process.poll() is None:
-                context.checkpoint()
-                if time.monotonic() > deadline:
-                    raise TimeoutError('技能脚本超过 600 秒。')
-                if os.fstat(output.fileno()).st_size + os.fstat(errors.fileno()).st_size > 1024 * 1024:
-                    raise ValueError('技能脚本输出超过 1 MiB。')
-                time.sleep(.02)
-        finally:
-            stop_script(process)
-        output.seek(0)
-        text = output.read(65536).decode('utf-8', errors='replace').strip()
-        if process.returncode:
-            return {'status': 'failed', 'message': '技能脚本执行失败，退出码：' + str(process.returncode)}
-        try:
-            result = json.loads(text)
-        except ValueError:
-            result = None
-        if isinstance(result, dict) and result.get('status') in {
-                'success', 'failed', 'auth_required', 'clarification_required'} and isinstance(result.get('message'), str):
-            return result
-        return {'status': 'success', 'message': text[:200] or '脚本执行完成。', 'output': text}
+    return _result(_process(skill, command, context))
 
 
 class SkillRuntime:
-    """调度器内部适配；skill 作者无需实现这一组方法。"""
+    """宿主适配器；不会在 Buddy 进程内导入技能模块。"""
     def __init__(self, skill):
         self.skill = skill
-        self.module = None
+        self.adapter = skill.get('adapter', {})
+        self.descriptions = {}
 
-    def native_module(self):
-        if self.module is None and self.skill.get('entrypoint'):
-            from primebuddy.skills.manager import load_entry
-            self.module = load_entry(self.skill['root'], self.skill['entrypoint'])
-        return self.module
+    def close(self):
+        # 每次子进程执行自行清理，没有跨任务复用的业务 Python 客户端。
+        pass
 
-    def __getattr__(self, name):
-        module = self.native_module()
-        if module is None:
-            raise AttributeError(name)
-        return getattr(module, name)
+    def _values(self, context, args=None):
+        return dict(args or {}, config=str(config_path('config.yaml', skill=self.skill['name'])),
+                    data=str(skill_data(self.skill['name'])),
+                    runtime=str(private_dir(_runtime(context) / self.skill['name'])))
+
+    def _command(self, template, context, args=None):
+        path, arguments = command_arguments(template, self._values(context, args))
+        return script_command(self.skill['root'], path, arguments)
+
+    def _query(self, template, context, args=None, *, cleanup=False):
+        process = _process(self.skill, self._command(template, context, args), context, 30, cleanup=cleanup)
+        if not _finished(process):
+            raise SetupError('技能只读查询或清理命令未完成。')
+        result = _json_output(process)
+        if result is None:
+            raise SetupError('已配置的技能查询命令没有返回 JSON 对象。')
+        return result
+
+    def _native(self, operation, context=None, action=None, args=None, **extra):
+        if not self.skill.get('entrypoint'):
+            return None
+        if context is None:
+            from primebuddy.core.engine import Context
+            context = Context()
+        runtime = _runtime(context)
+        request = dict(root=str(self.skill['root']), entrypoint=self.skill['entrypoint'], operation=operation,
+                       action=action, args=args or {}, context=dict(runtime=str(runtime),
+                       skill_configs=context.skill_configs, simulate=context.simulate), **extra)
+        if action:
+            request['handler'] = self.skill['actions'][action].get('handler', action)
+        with tempfile.TemporaryDirectory(prefix='skill-call-', dir=runtime) as temporary:
+            incoming, outgoing = Path(temporary) / 'request.json', Path(temporary) / 'result.json'
+            write_json(incoming, request)
+            command = [sys.executable, '-m', 'primebuddy.skills.worker', str(incoming), str(outgoing)]
+            process = _process(self.skill, command, context, 600 if operation == 'run' else 30)
+            if operation == 'run' and process['status'] != 'exited':
+                return _result(process)
+            if (not _finished(process) or not outgoing.is_file() or outgoing.stat().st_size > 65536):
+                raise SetupError('旧原生适配子进程执行未完成。')
+            result = json.loads(outgoing.read_text())
+            if 'value' not in result:
+                raise SetupError('旧原生适配没有返回结果。')
+            return result['value']
 
     def validate(self, action, args):
         if action == 'script':
             script_command(self.skill['root'], args['path'], args['arguments'])
+        elif self.adapter:
+            template = self.skill['actions'][action]['command']
+            path, arguments = command_arguments(template, dict(args, config='', data='', runtime=''))
+            script_command(self.skill['root'], path, arguments)
         else:
-            module = self.native_module()
-            handler = self.skill['actions'][action].get('handler', action)
-            if not callable(getattr(module, handler, None)):
-                raise SetupError('原生工具函数不存在：' + self.skill['name'] + '.' + handler)
-            if callable(getattr(module, 'validate', None)):
-                module.validate(action, args)
+            self._native('validate', action=action, args=args)
+
+    def _isolate(self, context):
+        try:
+            marker = Path(self._values(context)['runtime']) / 'cleanup-unconfirmed.json'
+            write_json(marker, {'resources': sorted({resource for action in self.skill['actions'].values()
+                                                   for resource in action['resources']})})
+        except OSError:
+            from primebuddy.core.engine import CleanupUnconfirmed
+            raise CleanupUnconfirmed('设备清理未确认，且无法保存隔离记录。') from None
+
+    def _verify(self, context, *, recover=False):
+        from primebuddy.core.engine import CleanupUnconfirmed
+        marker = Path(self._values(context)['runtime']) / 'cleanup-unconfirmed.json'
+        try:
+            if recover and self.adapter.get('recover'):
+                try:
+                    self._query(self.adapter['recover'], context, cleanup=True)
+                except SetupError:
+                    pass
+            state = self._query(self.adapter['status'], context, cleanup=True)
+            if state.get('status') != 'success' or state.get('resources_released') is not True:
+                raise SetupError('设备状态未确认。')
+        except Exception:
+            self._isolate(context)
+            raise CleanupUnconfirmed('技能设备清理未确认，保留恢复记录。') from None
+        marker.unlink(missing_ok=True)
 
     def preflight(self, action, args, context):
-        if action != 'script':
-            module = self.native_module()
-            if callable(getattr(module, 'preflight', None)):
-                module.preflight(action, args, context)
+        from primebuddy.core.engine import CleanupUnconfirmed
+        if context.simulate and self.adapter:
+            return
+        marker = Path(self._values(context)['runtime']) / 'cleanup-unconfirmed.json'
+        if not context.simulate:
+            if self.adapter.get('status'):
+                self._verify(context)
+            elif marker.exists():
+                raise CleanupUnconfirmed('技能资源尚未确认释放。')
+        if action == 'script':
+            return
+        if self.adapter:
+            template = self.skill['actions'][action].get('preflight')
+            if template and not context.simulate:
+                result = self._query(template, context, args)
+                if result.get('status') != 'success':
+                    raise ValueError('技能预检未通过。')
+        else:
+            self._native('preflight', context, action, args)
 
     def describe(self, action, args):
         if action == 'script':
             return '正在执行' + self.skill['name'] + '技能'
-        module = self.native_module()
-        if callable(getattr(module, 'describe', None)):
-            return module.describe(action, args)
-        return '正在执行' + self.skill['name'] + '的' + action
+        if self.adapter:
+            key = (action, json.dumps(args, sort_keys=True, ensure_ascii=False))
+            return self.descriptions.get(key) or self.skill['actions'][action].get(
+                'description', '正在执行' + self.skill['name']).format_map(args)
+        return self._native('describe', action=action, args=args) or '正在执行' + self.skill['name']
+
+    def planning_context(self, context):
+        if self.adapter.get('context'):
+            return self._query(self.adapter['context'], context)
+        return self._native('planning_context', context)
+
+    def confirmation(self, action, args, text, snapshot):
+        if self.adapter:
+            template = self.skill['actions'][action].get('confirmation')
+            if not template:
+                return None
+            from primebuddy.core.engine import Context
+            result = self._query(template, Context(), dict(args, request_text=text))
+            if isinstance(result.get('description'), str):
+                self.descriptions[(action, json.dumps(args, sort_keys=True, ensure_ascii=False))] = result['description']
+            return result.get('question')
+        return self._native('confirmation', action=action, args=args, text=text, snapshot=snapshot)
 
     def run(self, action, args, context):
+        from primebuddy.core.engine import CleanupUnconfirmed
+        try:
+            return self._run(action, args, context)
+        except CleanupUnconfirmed:
+            raise
+        except BaseException:
+            if not context.simulate and self.adapter.get('status'):
+                self._verify(context, recover=True)
+            elif not context.simulate and self._uses_hardware(action):
+                self._isolate(context)
+                raise CleanupUnconfirmed('设备任务异常，缺少独立状态确认能力。') from None
+            raise
+
+    def _uses_hardware(self, action):
+        return any(resource == 'speaker' or resource.startswith(('speaker.', 'robot.'))
+                   for resource in self.skill['actions'][action]['resources'])
+
+    def _run(self, action, args, context):
         if action == 'script':
-            return run_script(self.skill, args, context)
-        handler = self.skill['actions'][action].get('handler', action)
-        function = getattr(self.native_module(), handler, None)
-        if not callable(function):
-            raise SetupError('原生工具函数不存在：' + self.skill['name'] + '.' + handler)
-        result = function(context=context, **args)
-        if isinstance(result, str):
-            return {'status': 'success', 'message': result}
+            result = run_script(self.skill, args, context)
+        elif self.adapter:
+            definition = self.skill['actions'][action]
+            if context.simulate:
+                return {'status': 'success', 'message': '模拟：未执行 ' + self.skill['name'] + '。', 'simulated': True}
+            command = self._command(definition['command'], context, args)
+            result = _result(_process(self.skill, command, context, definition.get('timeout_seconds', 600),
+                                     stop_grace=definition.get('stop_grace_seconds')))
+        else:
+            result = self._native('run', context, action, args)
+            if isinstance(result, str):
+                result = {'status': 'success', 'message': result}
+        if not context.simulate:
+            if self.adapter.get('status'):
+                self._verify(context, recover=result.get('status') != 'success')
+            elif result.get('cleanup_confirmed') is False:
+                self._isolate(context)
+                from primebuddy.core.engine import CleanupUnconfirmed
+                raise CleanupUnconfirmed('技能进程清理未确认。')
+            elif result.get('termination_reason') and self._uses_hardware(action):
+                self._isolate(context)
+                from primebuddy.core.engine import CleanupUnconfirmed
+                raise CleanupUnconfirmed('设备任务已终止，但外部设备状态未确认。')
         return result

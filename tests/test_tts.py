@@ -10,7 +10,8 @@ from primebuddy.providers.qianwen.tts import TtsError, synthesize_wav
 from pathlib import Path
 import tempfile
 from unittest.mock import Mock
-from primebuddy.voice.speech_cache import SpeechCache
+from primebuddy.voice.speech_cache import SpeechCache, NETWORK_ERROR_PROMPT
+from primebuddy.voice.audio_format import validate_wav
 
 
 class TtsTests(unittest.TestCase):
@@ -86,6 +87,29 @@ def wav():
 
 
 class SpeechCacheTests(unittest.TestCase):
+    def test_network_notice_is_available_without_cache_or_cloud(self):
+        with tempfile.TemporaryDirectory() as root:
+            synth = Mock(side_effect=TimeoutError('offline'))
+            cache = SpeechCache(root, synth, limit=1)
+            path = cache.prepare(NETWORK_ERROR_PROMPT)
+            self.assertGreater(validate_wav(path.read_bytes()), 0)
+            self.assertEqual(list(Path(root).iterdir()), [])
+            # 缓存清空及更换模型都不会删除或重新合成故障提示。
+            second = SpeechCache(root, synth, identity='different-voice')
+            self.assertEqual(second.prepare(NETWORK_ERROR_PROMPT), path)
+            synth.assert_not_called()
+
+    def test_invalid_bundled_notice_does_not_fall_back_to_cloud(self):
+        with tempfile.TemporaryDirectory() as root:
+            asset = Path(root) / 'resource/voice/network-error.wav'
+            asset.parent.mkdir(parents=True)
+            asset.write_bytes(b'invalid')
+            synth = Mock()
+            with patch('primebuddy.voice.speech_cache.application_directory', return_value=Path(root)):
+                with self.assertRaises(TtsError):
+                    SpeechCache(Path(root) / 'cache', synth).prepare(NETWORK_ERROR_PROMPT)
+            synth.assert_not_called()
+
     def test_repeated_prompt_and_new_session_do_not_call_cloud_again(self):
         with tempfile.TemporaryDirectory() as root:
             synth = Mock(return_value=wav())

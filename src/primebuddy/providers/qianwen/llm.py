@@ -1,6 +1,9 @@
 """千问文本与工具调用协议；不负责执行工具或重试业务。"""
+import http.client
 import json
+import urllib.error
 import urllib.request
+from primebuddy.providers.errors import ProviderNetworkError, is_network_error
 from primebuddy.providers.http import NoRedirect
 
 
@@ -14,8 +17,13 @@ def request_message(messages, config, tools=None):
     request = urllib.request.Request(config['endpoint'], method='POST',
         data=json.dumps(body).encode(), headers={'Content-Type': 'application/json',
         'Authorization': 'Bearer ' + config['api_key']})
-    with urllib.request.build_opener(NoRedirect).open(request, timeout=30) as response:
-        raw = response.read(65537)
+    try:
+        with urllib.request.build_opener(NoRedirect).open(request, timeout=30) as response:
+            raw = response.read(65537)
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
+        if is_network_error(error):
+            raise ProviderNetworkError('LLM 网络连接失败或超时。') from None
+        raise
     if len(raw) > 65536:
         raise ValueError('计划响应过大')
     choice = json.loads(raw)['choices'][0]

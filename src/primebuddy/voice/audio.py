@@ -1,4 +1,4 @@
-"""技能统一音频能力：串行播放、转码、原厂会话生命周期与任务清理。"""
+"""框架自身的语音播报：串行播放、转码、原厂会话生命周期与任务清理。"""
 from contextlib import ExitStack
 import math
 from pathlib import Path
@@ -6,9 +6,9 @@ import threading
 from urllib.parse import urlsplit
 import wave
 
-from primebuddy.integrations.t1.robot_audio import AudioError, RobotAudio, check_cancel
-from primebuddy.integrations.t1.native_media import NativeMedia
-from primebuddy.integrations.t1.prepared_audio import PreparedAudio
+from primebuddy.integrations.primebot.robot_audio import AudioError, RobotAudio, check_cancel
+from primebuddy.integrations.primebot.native_media import NativeMedia
+from primebuddy.integrations.primebot.prepared_audio import PreparedAudio
 
 
 class AudioOutput:

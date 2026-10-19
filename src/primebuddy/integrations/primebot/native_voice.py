@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 
-from primebuddy.integrations.t1.robot_audio import AudioError
+from primebuddy.integrations.primebot.robot_audio import AudioError
 from primebuddy.core.timing import progress
 
 logger = logging.getLogger(__name__)
@@ -19,9 +19,11 @@ def trace(event, **fields):
 
 
 class NativeVoiceInput:
-    def __init__(self, runtime, robot):
+    def __init__(self, runtime, robot, stream_id=0):
         self.robot = robot
+        self.stream_id = stream_id
         self.events = queue.Queue(maxsize=16)
+        self.interrupts = queue.Queue(maxsize=2)
         self.ready = threading.Event()
         self.closed = threading.Event()
         self.generation = 0
@@ -34,6 +36,7 @@ class NativeVoiceInput:
         self.started_at = 0
         self.last_packet_at = 0
         self.conversation_state = None
+        self.wait_for_new_listening = False
         self.last_health_check = 0
         self.window_packets = 0
         self.window_stream_packets = 0
@@ -51,21 +54,71 @@ class NativeVoiceInput:
     def listen(self, generation):
         if self.current(generation):
             self.phase = 'listening'
+            self.wait_for_new_listening = False
             self.buffer = None
             self.deadline = time.monotonic() + 30
             self.opened_at_ns = self.robot.node.get_clock().now().nanoseconds
             self.window_packets = self.window_stream_packets = self.window_stale_packets = 0
             trace('listen_window_open', seconds=30, native_state=self.conversation_state)
 
+    def monitor_interrupt(self, generation):
+        """暂存完整语句；调用方必须已有明确的取消来源，不能把 VAD 当作唤醒。"""
+        if self.current(generation):
+            self.phase = 'interrupt'
+            self.buffer = None
+            self.opened_at_ns = self.robot.node.get_clock().now().nanoseconds
+            self.window_packets = self.window_stream_packets = self.window_stale_packets = 0
+            self._clear_interrupts()
+
+    def stop_interrupt(self, generation):
+        if self.current(generation) and self.phase == 'interrupt':
+            self.phase = 'muted'
+            self.buffer = None
+            self._clear_interrupts()
+
+    def _clear_interrupts(self):
+        while True:
+            try:
+                self.interrupts.get_nowait()
+            except queue.Empty:
+                return
+
+    def begin_interrupt(self, generation):
+        """旧轮失效，收音继续暂存，等待旧任务确认完成业务清理。"""
+        if not self.current(generation):
+            return None
+        self.generation += 1
+        trace('interrupt_pending', generation=self.generation)
+        return self.generation
+
+    def resume_after_interrupt(self, generation):
+        """清理确认后开窗，保留已开始或已完整到达的下一句话。"""
+        if not self.current(generation):
+            return None
+        self.phase = 'listening'
+        self.deadline = time.monotonic() + 30
+        self.window_packets = self.window_stream_packets = self.window_stale_packets = 0
+        while True:
+            try:
+                audio = self.interrupts.get_nowait()
+            except queue.Empty:
+                break
+            self.emit('utterance', audio)
+        trace('interrupt_listen_open', generation=self.generation)
+        return self.generation
+
     def idle(self, generation):
         if self.current(generation):
             self.phase = 'muted'
             self.buffer = None
 
-    def wait_for_wake(self, generation):
+    def wait_for_listening(self, generation):
         if self.current(generation):
             self.phase = 'waiting'
             self.buffer = None
+            if self.conversation_state == 1 and not self.wait_for_new_listening:
+                self.emit('native_listening')
+                self.listen(generation)
 
     def on_state(self, msg):
         if self.closed.is_set() or self.error is not None:
@@ -74,27 +127,35 @@ class NativeVoiceInput:
         previous, self.conversation_state = self.conversation_state, state
         if state != previous:
             trace('native_state', previous=previous, state=state, phase=self.phase)
-        # 首帧与重复 LISTENING 不是新的会话；不把 VAD BEGIN 当作唤醒。
-        # 本机枚举 LISTENING=1，状态转入监听与双唤醒词的对应仍需实机验证。
-        if self.phase == 'waiting' and previous is not None and previous != 1 and state == 1:
+        if self.phase == 'listening' and state == 3:
+            # 原厂正在应答时丢弃未完成片段，恢复监听后必须等待新的 BEGIN。
+            self.buffer = None
+        # 只在空闲等待时跟随原厂开放监听；此状态也可能来自播放结束，不代表唤醒。
+        # 跟随首次或当前已知的 LISTENING；已开窗后重复状态不重置，也不取消任务。
+        # 超时后须有新的 LISTENING 转换，不能凭缓存或重复状态立即重开。
+        if self.phase == 'waiting' and state == 1 and (not self.wait_for_new_listening or previous != 1):
+            self.emit('native_listening')
             self.listen(self.generation)
-            self.emit('wake')
 
     def on_audio(self, msg):
         if self.closed.is_set() or self.error is not None:
             return
         try:
-            if self.phase == 'listening':
+            if self.phase in ('listening', 'interrupt'):
                 self.window_packets += 1
             # 本台 T1 实测内置流为0，不能套用 X2 文档的1或混合多路音频。
-            if int(msg.stream_id) != 0:
+            if int(msg.stream_id) != self.stream_id:
                 return
             state = int(msg.audio_vad_state.value)
             if state in (1, 3):
                 trace('vad_boundary', vad=state, phase=self.phase)
-            if self.phase != 'listening':
+            if self.phase not in ('listening', 'interrupt'):
                 return
             self.window_stream_packets += 1
+            if self.phase == 'listening' and self.conversation_state == 3:
+                if state in (1, 3):
+                    trace('discard_native_speaking', vad=state)
+                return
             stamp = msg.header.stamp
             timestamp = stamp.sec * 1_000_000_000 + stamp.nanosec
             if timestamp and timestamp < self.opened_at_ns:
@@ -121,14 +182,25 @@ class NativeVoiceInput:
             self.buffer.extend(pcm)
             self.last_packet_at = now
             if len(self.buffer) > 16000 * 2 * 15:
-                self.timeout('原厂语音超过15秒，已丢弃，未提交截断音频。')
+                if self.phase == 'interrupt':
+                    self.buffer = None
+                    trace('discard_interrupt_too_long')
+                else:
+                    self.timeout('原厂语音超过15秒，已丢弃，未提交截断音频。')
             elif state == 3:
                 answer = bytes(self.buffer)
                 self.buffer = None
                 if len(answer) >= 16000 * 2 * .2:
                     trace('utterance', seconds=round(len(answer) / 32000, 3))
-                    self.phase = 'muted'
-                    self.emit('utterance', answer)
+                    if self.phase == 'interrupt':
+                        try:
+                            self.interrupts.put_nowait(answer)
+                        except queue.Full:
+                            # 只保留有限候选；普通语音和音乐内容不积压为后续请求。
+                            trace('discard_interrupt_backlog')
+                    else:
+                        self.phase = 'muted'
+                        self.emit('utterance', answer)
         except Exception as error:
             self.error = error if isinstance(error, AudioError) else AudioError('原厂音频接收失败。')
 
@@ -136,7 +208,7 @@ class NativeVoiceInput:
         if reason is None:
             # 没有完整语句不等于用户没说话；区分前端无数据和本地丢帧。
             if self.window_packets == 0:
-                reason = '未收到原厂音频，请重新说“元仔元仔”唤醒后再试。'
+                reason = '未收到原厂音频，请通过机器人的原厂唤醒方式重新唤醒后再试。'
             elif self.window_stream_packets == 0:
                 reason = '未收到本体麦克风流，只有其他音频流。'
             elif self.window_stale_packets == self.window_stream_packets:
@@ -148,6 +220,7 @@ class NativeVoiceInput:
               stale_packets=self.window_stale_packets)
         self.buffer = None
         self.phase = 'muted'
+        self.wait_for_new_listening = True
         self.emit('timeout', reason)
 
     def check_health(self):
@@ -158,6 +231,10 @@ class NativeVoiceInput:
                     self.timeout('未收到原厂 VAD 结束帧，已丢弃未完成语音。')
             elif now >= self.deadline:
                 self.timeout()
+        elif self.phase == 'interrupt' and self.buffer is not None:
+            if now - self.last_packet_at > 3 or now - self.started_at > 18:
+                self.buffer = None
+                trace('discard_incomplete_interrupt')
         # 该话题不是连续流；安静时没有音频不能当成采集故障。
         if self.ready.is_set() and now - self.last_health_check > 5:
             self.last_health_check = now
@@ -176,7 +253,7 @@ class NativeVoiceInput:
             self.subscriptions.append(self.robot.node.create_subscription(msg_type, topic, callback, qos))
         deadline = time.monotonic() + 15
         while any(self.robot.node.count_publishers(topic) == 0 for topic in (AUDIO_TOPIC, STATE_TOPIC)):
-            from primebuddy.integrations.t1.robot_audio import check_cancel
+            from primebuddy.integrations.primebot.robot_audio import check_cancel
             check_cancel()
             if time.monotonic() >= deadline:
                 raise AudioError('原厂语音前端话题未就绪，未回退到原始麦克风。')
@@ -187,6 +264,7 @@ class NativeVoiceInput:
     def close(self):
         self.closed.set()
         self.buffer = None
+        self._clear_interrupts()
         for subscription in self.subscriptions:
             self.robot.node.destroy_subscription(subscription)
         self.subscriptions.clear()

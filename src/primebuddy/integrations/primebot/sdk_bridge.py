@@ -4,6 +4,7 @@ import time
 import uuid
 
 from primebuddy.config.storage import SetupError
+from primebuddy.providers.errors import ProviderNetworkError
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ def sdk_types():
         CommonState.SUCCESS, CommonState.FAILURE
         CommonState.REASON_NOT_SUPPORTED, CommonState.REASON_TASK_RUNNING, CommonState.REASON_ENGINE_NOT_READY
     except (ImportError, AttributeError):
-        raise SetupError('SDK 语音类型不可用或字段不匹配。请使用系统 Python，加载 T1 已安装的 ROS/aimdk_msgs setup.bash；不要覆盖原厂消息包。') from None
+        raise SetupError('SDK 语音类型不可用或字段不匹配。请使用系统 Python，加载目标 T1/Q1 已安装的 ROS/aimdk_msgs setup.bash；不要覆盖原厂消息包。') from None
     return AsrResult, PlayTts, CommonState
 
 
@@ -144,13 +145,16 @@ class SdkBridge:
             finished = (lambda: microphone.listen(generation)) if phase == 'listening' else None
             speak(self.pending, on_finished=finished)
             completed = True
+        except ProviderNetworkError:
+            # 先由 finally 释放请求槽，再交给语音会话播报离线网络提示。
+            raise
         except Exception as error:
             logger.error('SDK_TTS_PLAYBACK_FAILED %s', type(error).__name__)
         finally:
             self.pending = None
             self.busy = False
             if not completed or phase != 'listening':
-                microphone.wait_for_wake(generation)
+                microphone.wait_for_listening(generation)
 
     def close(self):
         self.busy = True

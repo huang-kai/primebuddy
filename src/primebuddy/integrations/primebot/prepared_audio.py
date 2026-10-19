@@ -8,7 +8,10 @@ import subprocess
 import threading
 import time
 
-from primebuddy.integrations.t1.robot_audio import AudioError, SOC0, ssh_options
+from primebuddy.integrations.primebot.robot_audio import AudioError
+
+
+from .device import host_command
 
 
 class PreparedAudio:
@@ -17,8 +20,7 @@ class PreparedAudio:
         self.path = None
         self.closed = self.error = False
         script = Path(__file__).with_name('prepare_audio_process.py').read_text()
-        self.proc = subprocess.Popen(['ssh', '-T', *ssh_options(runtime), SOC0,
-                                      'python3 -u -c ' + shlex.quote(script)],
+        self.proc = subprocess.Popen(host_command(runtime, 'python3 -u -c ' + shlex.quote(script)),
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL, text=True)
         def read():

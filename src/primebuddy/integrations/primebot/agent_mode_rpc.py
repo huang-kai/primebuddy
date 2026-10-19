@@ -1,4 +1,5 @@
 """在 SoC 0 的独立 ROS 进程中读写模式，避免 Agent 重启后的旧客户端失效。"""
+import os
 import json
 import sys
 
@@ -9,7 +10,7 @@ def main():
     from aimdk_msgs.srv import GetAgentPropertiesRequest, SetAgentPropertiesRequest
 
     rclpy.init()
-    node = rclpy.create_node('qqmusic_agent_mode')
+    node = rclpy.create_node('primebuddy_agent_mode_' + str(os.getpid()))
     try:
         if AgentPropertyIdType.AGENT_PROPERTY_RUN_MODE != 2:
             raise RuntimeError('模式属性定义不匹配')
@@ -21,7 +22,7 @@ def main():
                 if not client.wait_for_service(timeout_sec=20):
                     raise RuntimeError('模式服务未就绪')
                 future = client.call_async(request)
-                rclpy.spin_until_future_complete(node, future, timeout_sec=10)
+                rclpy.spin_until_future_complete(node, future, timeout_sec=15)
                 if not future.done() or future.result() is None:
                     raise RuntimeError('模式请求超时')
                 response = future.result()

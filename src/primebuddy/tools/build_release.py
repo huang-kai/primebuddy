@@ -41,7 +41,7 @@ def framework_zip(output, bundles):
             archive.write(ROOT / name, 'primebuddy/' + name)
         if (ROOT / 'LICENSE').is_file():
             archive.write(ROOT / 'LICENSE', 'primebuddy/LICENSE')
-        for name in ('config.example.yaml', 'providers.example.yaml'):
+        for name in ('config.example.yaml', 'providers.example.yaml', 'skill-adapters.example.yaml'):
             archive.write(ROOT / 'cfg' / name, 'primebuddy/cfg/' + name)
         for name in ('src', 'resource', 'scripts'):
             # 随包技能由本次打包生成，不带入旧安装目录中的重复版本。

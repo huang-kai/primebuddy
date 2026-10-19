@@ -1,5 +1,6 @@
 """使用现有北京地域百炼配置生成千问提示音，输出 SDK 可播放的 WAV。"""
 import argparse
+import http.client
 import io
 import json
 import os
@@ -12,7 +13,7 @@ import urllib.request
 import wave
 
 from primebuddy.core.timing import measure
-from primebuddy.providers.errors import TtsError
+from primebuddy.providers.errors import TtsError, TtsNetworkError, is_network_error
 from primebuddy.voice.audio_format import MAX_BYTES, validate_wav
 
 
@@ -85,8 +86,10 @@ def synthesize_wav(text, config=None):
         return normalize_wav(data)
     except urllib.error.HTTPError as error:
         raise TtsError(f'TTS HTTP {error.code}；请核对北京地域密钥、模型权限和配额。') from None
-    except (urllib.error.URLError, TimeoutError):
-        raise TtsError('TTS 网络连接失败或超时。') from None
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
+        if is_network_error(error):
+            raise TtsNetworkError('TTS 网络连接失败或超时。') from None
+        raise TtsError('TTS 请求失败，请核对服务连接配置。') from None
     except (KeyError, TypeError, ValueError):
         raise TtsError('TTS 返回结构不符合预期。') from None
 

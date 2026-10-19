@@ -20,8 +20,8 @@ def dispatch_command(argv=None):
     parser.add_argument('--version', action='version', version='PrimeBuddy ' + __version__)
     commands = parser.add_subparsers(dest='command', metavar='命令')
     commands.add_parser('onboard', help='配置模型服务，安装或配置随包技能')
-    start = commands.add_parser('start', help='启动平台，当前使用 T1 语音入口',
-        description='启动 T1 平台会话并执行已启用技能。接管原厂 Agent 为 only_voice 并重启，Ctrl+C 退出时恢复原模式。')
+    start = commands.add_parser('start', help='启动平台，自动识别 T1/Q1 语音入口',
+        description='启动 T1/Q1 平台会话并执行已启用技能。接管原厂 Agent 为 only_voice 并重启，Ctrl+C 退出时恢复原模式。')
     start.add_argument('--sdk-bridge', choices=('namespaced', 'native', 'off'), default='namespaced',
         help='ROS ASR/TTS 兼容入口：namespaced 使用 /primebuddy（默认）；native 使用原厂名称，冲突则退出；off 关闭')
     start.add_argument('--asr-model', help='仅覆盖本次会话的 ASR provider:model；不指定时读取 config.yaml，失败不自动回退')
@@ -79,8 +79,11 @@ def dispatch_command(argv=None):
     if args.command == 'start':
         from primebuddy.voice.session import serve
         context.asr_model = args.asr_model
-        logger.info('启动 T1 平台：预检通过后接管原厂 Agent 为 only_voice 并重启；Ctrl+C 退出并恢复原模式。')
-        serve(registry, context, sdk_bridge=args.sdk_bridge)
+        logger.info('启动 T1/Q1 平台：预检通过后接管原厂 Agent 为 only_voice 并重启；Ctrl+C 退出并恢复原模式。')
+        try:
+            serve(registry, context, sdk_bridge=args.sdk_bridge)
+        finally:
+            registry.close()
         return
     if args.text is not None:
         from primebuddy.core.planner import plan

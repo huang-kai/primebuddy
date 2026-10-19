@@ -24,7 +24,7 @@ from primebuddy.config.storage import SetupError
 logger = logging.getLogger(__name__)
 
 CANCEL = threading.Event()
-SOC0 = 'run@10.1.1.100'  # T1 跨板音频使用的 SoC 0 内部 SSH 地址。
+from .device import detect_device, audio_host, host_command
 SSH = {'connect_timeout': 8, 'alive_interval': 5, 'alive_count': 2, 'persist_seconds': 1800}
 
 
@@ -47,14 +47,14 @@ def ssh_options(runtime):
             '-o', f'UserKnownHostsFile={runtime}/known_hosts']
 
 
-def require_jetson():
-    identity = Path('/robot/data/info/soc_index')
-    if not identity.is_file() or identity.read_text().strip() != '1':
-        raise AudioError('机器人音频任务仅在 Jetson（SoC 1）运行。')
+def require_robot():
+    return detect_device()
 
 
 def connect_soc0(runtime):
-    require_jetson()
+    require_robot()
+    if audio_host() == 'local':
+        return
     # 串行建连，避免两个启动进程同时清理或创建控制 socket。
     with (runtime / 'soc0-connect.lock').open('a') as lock:
         try:
@@ -91,7 +91,7 @@ def connect_soc0(runtime):
             subprocess.run(['ssh', '-o', f'ConnectTimeout={SSH["connect_timeout"]}', '-o', f'ServerAliveInterval={SSH["alive_interval"]}',
                             '-o', f'ServerAliveCountMax={SSH["alive_count"]}', '-o', f'ControlPath={path}',
                             '-o', f'UserKnownHostsFile={runtime}/known_hosts',
-                            '-o', 'ControlMaster=yes', '-o', f'ControlPersist={SSH["persist_seconds"]}', '-Nf', SOC0],
+                            '-o', 'ControlMaster=yes', '-o', f'ControlPersist={SSH["persist_seconds"]}', '-Nf', audio_host()],
                            check=True, timeout=60)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
             raise AudioError('跨板 SSH 登录失败或超时，请检查连接与密码后重试。') from None
@@ -101,8 +101,10 @@ def connect_soc0(runtime):
 
 
 def soc0_connected(runtime):
+    if audio_host() == 'local':
+        return True
     try:
-        result = subprocess.run(['ssh', *ssh_options(runtime), '-O', 'check', SOC0],
+        result = subprocess.run(['ssh', *ssh_options(runtime), '-O', 'check', audio_host()],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
         return result.returncode == 0
     except (subprocess.TimeoutExpired, OSError):
@@ -163,7 +165,7 @@ def run_child(args, timeout, payload=None, checkpoint=None):
 
 class RobotAudio:
     def __init__(self, runtime):
-        require_jetson()
+        require_robot()
         self.runtime = runtime
         import rclpy
         from rclpy.context import Context
@@ -218,9 +220,16 @@ class RobotAudio:
         deadline = time.monotonic() + 4
         while time.monotonic() < deadline:
             self.spin()
-        return {'soc_index': 1, 'play_service': self.play_client.service_is_ready(),
-                'stop_service': self.stop_client.service_is_ready(),
-                'soc0_ssh_connected': soc0_connected(self.runtime)}
+        from aimdk_msgs.srv import PlayMediaFile, StopTtsTraceId
+        clients = [self.node.create_client(kind, '/aimdk_5Fmsgs/srv/' + kind.__name__)
+                   for kind in (PlayMediaFile, StopTtsTraceId)]
+        try:
+            ready = [client.wait_for_service(timeout_sec=8) for client in clients]
+            return dict(play_service=ready[0], stop_service=ready[1],
+                        soc0_ssh_connected=soc0_connected(self.runtime))
+        finally:
+            for client in clients:
+                self.node.destroy_client(client)
 
     def stop_owned(self):
         from aimdk_msgs.srv import StopAudioPlay
@@ -249,8 +258,11 @@ class RobotAudio:
 
     @contextlib.contextmanager
     def prepared_audio(self, path, checkpoint=None):
-        # 音频服务位于 SoC 0，先将 Jetson 文件传到本任务独占的临时目录。
-        raw = run_child(['ssh', *ssh_options(self.runtime), SOC0,
+        if audio_host() == 'local':
+            yield Path(path).resolve()
+            return
+        # 非本地服务只传输本任务文件，不假设跨板共享文件系统。
+        raw = run_child(['ssh', *ssh_options(self.runtime), audio_host(),
                          'mktemp -d /tmp/qiyuan-qqmusic.XXXXXXXX'], 12, checkpoint=checkpoint)
         directory = raw.decode().strip()
         import re
@@ -258,12 +270,12 @@ class RobotAudio:
             raise AudioError('未取得可验证的临时音频目录。')
         remote = directory + '/audio.wav'
         try:
-            run_child(['scp', *ssh_options(self.runtime), str(path), f'{SOC0}:{remote}'], 45, checkpoint=checkpoint)
+            run_child(['scp', *ssh_options(self.runtime), str(path), f'{audio_host()}:{remote}'], 45, checkpoint=checkpoint)
             yield Path(remote)
         finally:
             # 只清理本次创建的媒体目录，不删除原厂文件或日志。
             try:
-                subprocess.run(['ssh', *ssh_options(self.runtime), SOC0,
+                subprocess.run(['ssh', *ssh_options(self.runtime), audio_host(),
                                 'rm -f ' + shlex.quote(remote) + ' && rmdir ' + shlex.quote(directory)],
                                check=True, timeout=15, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception:

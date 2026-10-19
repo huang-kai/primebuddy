@@ -1,21 +1,30 @@
 """千问 ASR 配置与短句识别；不控制机器人，不输出密钥。"""
 import argparse
 import base64
+import http.client
 import io
 import json
+import logging
 from pathlib import Path
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 import wave
 
-from primebuddy.providers.errors import AsrError
+from primebuddy.providers.errors import AsrError, AsrNetworkError, is_network_error
 
 # 两个已实现的请求协议；向导的候选列表由 providers.yaml 维护。
 MODEL = 'qwen3-asr-flash'
 NEW_MODEL = 'qwen-audio-3.1-asr-flash'
 SAMPLE = 'https://dashscope.oss-cn-beijing.aliyuncs.com/audios/welcome.mp3'
+logger = logging.getLogger(__name__)
+
+
+def request_log(stage, elapsed, **details):
+    # 仅接收状态、类型、errno 和耗时；不记录异常正文、请求或响应数据。
+    logger.info('ASR_REQUEST %s', json.dumps(dict(stage=stage, seconds=round(elapsed, 3), **details)))
 
 
 def endpoint(host):
@@ -76,15 +85,32 @@ def recognize(audio, config, model=None, vocabulary=None):
         data=json.dumps(body).encode(), method='POST',
         headers={'Content-Type': 'application/json',
                  'Authorization': 'Bearer ' + config['api_key']})
+    started = time.monotonic()
     try:
         with urllib.request.build_opener(NoRedirect).open(request, timeout=30) as response:
-            result = json.load(response)
+            received = time.monotonic()
+            status = response.status if type(response.status) is int else None
+            request_log('headers', received - started, http_status=status)
+            try:
+                result = json.load(response)
+            finally:
+                request_log('json', time.monotonic() - received)
     except urllib.error.HTTPError as error:
+        status = error.code if type(error.code) is int else None
+        request_log('http_error', time.monotonic() - started, http_status=status)
         hints = {401: '核对密钥与地域', 403: '核对模型权限',
                  404: '核对 API Host 和模型', 429: '核对配额、余额或限流'}
-        raise AsrError(f'ASR HTTP {error.code}；' + hints.get(error.code, '请核对百炼调用状态')) from None
-    except (urllib.error.URLError, TimeoutError):
-        raise AsrError('ASR 网络连接失败或超时，请核对 Jetson 外网连接。') from None
+        raise AsrError(f'ASR HTTP {status}；' + hints.get(status, '请核对百炼调用状态')) from None
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
+        reason = error.reason if isinstance(error, urllib.error.URLError) else error
+        number = getattr(reason, 'errno', None)
+        network = is_network_error(error)
+        request_log('network_error' if network else 'request_error',
+                    time.monotonic() - started, reason_type=type(reason).__name__,
+                    errno=number if type(number) is int else None)
+        if network:
+            raise AsrNetworkError('ASR 网络连接失败或超时，请核对当前网络连接。') from None
+        raise AsrError('ASR 请求失败，请核对服务连接配置。') from None
     try:
         text = (result['output']['text'] if body['model'] == NEW_MODEL
                 else result['choices'][0]['message']['content'])

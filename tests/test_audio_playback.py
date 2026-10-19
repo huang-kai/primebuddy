@@ -4,14 +4,14 @@ import threading
 import unittest
 from unittest.mock import patch
 from primebuddy.voice.audio import AudioOutput
-from primebuddy.integrations.t1.robot_audio import AudioError
+from primebuddy.integrations.primebot.robot_audio import AudioError
 from types import SimpleNamespace
 from unittest.mock import Mock
-from primebuddy.integrations.t1.native_media import NativeMedia
+from primebuddy.integrations.primebot.native_media import NativeMedia, matched_publishers
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace as NS
 import wave
-from primebuddy.integrations.t1 import prepare_audio_process
+from primebuddy.integrations.primebot import prepare_audio_process
 
 
 class AudioOutputTests(unittest.TestCase):
@@ -134,11 +134,79 @@ class NativeMediaTests(unittest.TestCase):
         player.submitted = True
         player.duration = 35
         player.requested_at = 1
+        player.playing_status, player.end_status = 2, 3
+        player.confirmed_terminal, player.failure_statuses = {3, 4}, {5, 7}
+        player.stop_failed = False
+        player.subscription = SimpleNamespace(get_publisher_count=lambda: 1)
         return player
+
+    def test_target_prefixed_enums_distinguish_stopped_from_error(self):
+        import sys
+        class StatusType:
+            TTS_STATUS_TYPE_PLAYING = 2
+            TTS_STATUE_TYPE_END = 3
+            TTS_STATUS_TYPE_STOP = 4
+            TTS_STATUS_TYPE_ERROR = 5
+            TTS_STATUS_TYPE_NOT_INQUE = 7
+        class Status:
+            def __init__(self): self.tts_status = StatusType()
+        with patch.dict(sys.modules, {'aimdk_msgs.msg': SimpleNamespace(TtsStatus=Status),
+                'aimdk_msgs.srv': SimpleNamespace(PlayMediaFile=object, StopTtsTraceId=object)}):
+            p = NativeMedia(SimpleNamespace(node=Mock(), qos=object()))
+        self.assertEqual((p.playing_status, p.end_status), (2, 3))
+        self.assertEqual(p.confirmed_terminal, {3, 4})
+        self.assertTrue(p.failure_statuses.isdisjoint(p.confirmed_terminal))
+
+    def test_waits_for_actual_subscription_match_before_play_request(self):
+        p = self.player()
+        p.submitted = False
+        p.robot = Mock()
+        p.play_type = SimpleNamespace(Request=lambda: SimpleNamespace(
+            media_file_req=SimpleNamespace(priority_level=SimpleNamespace(value=0))))
+        p.play_client = object()
+        order = []
+        p.robot.spin.side_effect = lambda **kwargs: order.append('spin')
+        p.call = Mock(side_effect=lambda *args: (order.append('play'),
+            SimpleNamespace(tts_resp=SimpleNamespace(is_success=True)))[1])
+        with patch('primebuddy.integrations.primebot.native_media.matched_publishers', side_effect=[0, 0, 1]):
+            p.start('/tmp/test/audio.wav', 1)
+        self.assertEqual(order, ['spin', 'spin', 'play'])
+
+    def test_unmatched_subscription_never_submits_play(self):
+        p = self.player()
+        p.submitted = False
+        p.robot, p.call = Mock(), Mock()
+        with patch('primebuddy.integrations.primebot.native_media.matched_publishers', return_value=0),\
+                patch('primebuddy.integrations.primebot.native_media.time.monotonic', side_effect=[0, 7]):
+            with self.assertRaisesRegex(AudioError, '尚未匹配'):
+                p.start('/tmp/test/audio.wav', 1)
+        self.assertFalse(p.submitted)
+        p.call.assert_not_called()
+
+    def test_humble_match_count_uses_protected_rcl_handle(self):
+        class Handle:
+            pointer = 123
+            entered = False
+            def __enter__(self): self.entered = True
+            def __exit__(self, *args): self.entered = False
+        handle = Handle()
+        def query(pointer, count):
+            self.assertTrue(handle.entered)
+            self.assertEqual(pointer, handle.pointer)
+            count._obj.value = 2
+            return 0
+        with patch('ctypes.CDLL', return_value=SimpleNamespace(rcl_subscription_get_publisher_count=query)):
+            self.assertEqual(matched_publishers(SimpleNamespace(handle=handle)), 2)
+        self.assertFalse(handle.entered)
+
+    def test_unavailable_match_query_is_not_treated_as_matched(self):
+        with patch('ctypes.CDLL', side_effect=OSError()):
+            with self.assertRaises(AudioError):
+                matched_publishers(SimpleNamespace())
 
     def event(self, player, status, trace='owned', at=2):
         from unittest.mock import patch
-        with patch('primebuddy.integrations.t1.native_media.time.monotonic', return_value=at):
+        with patch('primebuddy.integrations.primebot.native_media.time.monotonic', return_value=at):
             player.on_status(SimpleNamespace(trace_id=trace, tts_status=SimpleNamespace(value=status)))
 
     def test_foreign_end_cannot_finish_own_playback(self):
@@ -174,6 +242,7 @@ class NativeMediaTests(unittest.TestCase):
             self.event(p, status, at=10)
             with self.assertRaises(AudioError):
                 p.poll(now=10)
+            self.assertEqual(p.submitted, status in (5, 7))
 
     def test_missing_feedback_times_out_without_resubmit(self):
         p = self.player()
@@ -193,6 +262,30 @@ class NativeMediaTests(unittest.TestCase):
         p.call = call
         p.stop()
         self.assertFalse(p.submitted)
+
+    def test_error_during_stop_does_not_confirm_release_or_repeat_request(self):
+        for status in (5, 7):
+            p = self.player()
+            p.stop_type = SimpleNamespace(Request=lambda: SimpleNamespace(trace_id=''))
+            p.stop_client, p.robot = object(), Mock()
+            p.events = [(2, status)]
+            p.call = Mock()
+            with patch('primebuddy.integrations.primebot.native_media.time.monotonic', side_effect=[0, 0, 6]):
+                with self.assertRaisesRegex(AudioError, '停止未确认'):
+                    p.stop()
+            self.assertTrue(p.submitted)
+            with self.assertRaisesRegex(AudioError, '未重复提交'):
+                p.stop()
+            p.call.assert_called_once()
+
+    def test_natural_end_while_waiting_to_stop_needs_no_stop_request(self):
+        p = self.player()
+        p.stop_type = SimpleNamespace(Request=lambda: SimpleNamespace(trace_id=''))
+        p.stop_client, p.call = object(), Mock()
+        p.wait_feedback = lambda **kwargs: self.event(p, 3, at=37)
+        p.stop()
+        self.assertFalse(p.submitted)
+        p.call.assert_not_called()
 
     def test_open_listen_before_file_cleanup_after_confirmed_end(self):
         import tempfile

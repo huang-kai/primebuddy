@@ -2,7 +2,7 @@
 
 PrimeBuddy 是一个让机器人通过语音调用技能的 Python 框架。你可以对机器人说“放一首歌”或“打开灯”，由框架识别语音、理解请求，交给相应的 skill 执行，再用语音告诉你结果。
 
-框架负责通用的语音和任务流程，skill 负责具体业务。开发新能力时，通常只需添加技能说明和业务脚本，无需修改框架。当前版本为 **1.0.0**，机器人语音入口适配启元 T1，运行在业务板 SoC 1。
+框架负责通用的语音和任务流程，skill 负责具体业务。开发新能力时，通常只需添加技能说明和业务脚本，无需修改框架。当前版本为 **1.0.0**，启动时识别启元 T1/Q1，只适配框架自身的原厂语音前端和播报。技能独立使用设备接口，不依赖框架播放器。
 
 当前提供两个独立 skill，源码在 [PrimeSkills](https://github.com/huang-kai/primeskills)：
 
@@ -50,7 +50,7 @@ flowchart LR
 | `providers/` | 模型服务适配，当前接入千问 |
 | `core/` | 任务规划、执行、取消和资源协调 |
 | `skills/` | 技能发现、安装、配置和脚本执行 |
-| `integrations/t1/` | 对接 T1 的原厂语音、音频和 ROS 2 接口 |
+| `integrations/primebot/` | T1/Q1 身份识别、框架自身语音和原厂 Agent 管理 |
 | `config/`、`tools/` | 配置、日志，以及安装、打包等工具 |
 
 语音运行需要机器人环境；技能编写、打包和大部分测试可以在电脑上完成。
@@ -59,9 +59,9 @@ flowchart LR
 
 ### 准备环境
 
-机器人运行环境需要 Python 3.10+，以及 T1 已安装的 ROS 2 和原厂消息包。请在 **业务板 SoC 1** 安装、运行框架。
+机器人运行环境需要系统 Python 3.10+、ROS 2 和目标设备已安装的原厂消息包。框架读取 `/robot/data/info/series` 识别 T1/Q1，不限制应用部署在 SoC 0 或 SoC 1；未知型号明确拒绝启动，不覆盖原厂消息包。
 
-录放音需要 `ffmpeg`，业务板还需要能通过 SSH 访问 SoC 0。首次启动时可能出现板间 SSH 主机确认和登录密码提示。
+语音服务与应用同机时直接调用，不需要 SSH。默认按当前已确认拓扑使用 SoC 0 的语音服务：部署于 SoC 0 采用本地路径，部署于 SoC 1 使用 `run@10.1.1.100`；可用 `PRIMEBOT_AUDIO_HOST=local` 或 `PRIMEBOT_AUDIO_HOST=user@host` 显式指定服务主机。远程文件准备和 Agent 管理需要预先配置可用的 SSH 登录；不会假设跨板共享文件。SDK 提供的 SSH/TCP 方式不因传输类型而被排除，但不能把直接出声当成已具备会话续听。
 
 千问模型调用需要 API Host、API Key 和网络连接。安装向导会引导你填写这些信息，再选择语音识别、对话和语音合成模型。
 
@@ -73,8 +73,7 @@ flowchart LR
 git clone https://github.com/huang-kai/primebuddy.git primebuddy
 cd primebuddy
 
-source /robot/etc/basic_env
-source /robot/software/housekeeper/bin/setup.bash
+source ./scripts/robot_env.sh
 source ./scripts/install.sh
 ```
 
@@ -84,8 +83,7 @@ source ./scripts/install.sh
 unzip primebuddy-1.0.0.rpk -d ./primebuddy-release
 cd primebuddy-release/primebuddy
 
-source /robot/etc/basic_env
-source /robot/software/housekeeper/bin/setup.bash
+source ./scripts/robot_env.sh
 source ./scripts/install.sh
 ```
 
@@ -114,7 +112,13 @@ primebuddy start
 
 启动后，先用机器人的原厂唤醒词唤醒，再提出技能请求；空闲超时后需要重新唤醒。当前语音入口主要用于技能调用和必要的澄清。命令在当前终端前台运行，按 **Ctrl+C** 退出。
 
-启动语音会话时，框架会把原厂 Agent 切换为 `only_voice` 并重启；正常退出时恢复启动前的模式。点歌台的动作联动由技能配置控制，开启后可能产生身体运动，使用前请阅读 [点歌台说明](https://github.com/huang-kai/primeskills/blob/main/diangetai/README.md)。
+启动时先检查技能遗留的播放和资源记录，未确认释放就不播放启动提示。启动提示结束后等待原厂开放监听，唤醒识别和唤醒应答由原厂 Agent 负责；框架只识别业务语音并播报业务结果。目前未验证到可明确表示原厂唤醒的通知，自动语音打断暂不可用，框架不根据 ASR 文本、会话状态转换或 VAD 开始帧取消任务。任务仍受运行超时、取消信号和进程清理保护；无法确认设备资源已释放时退出语音会话，不继续播放。歌曲正常结束后仍会打开 30 秒接话窗口，可直接提出下一个请求。
+
+原厂处于 SPEAKING 状态时，Buddy 不接收监听音频，并清除跨过该播报的不完整片段；恢复监听后须有新的完整 VAD 语句。空闲收音超时后等待新的原厂监听转换，缓存或重复的 LISTENING 状态不会立即重开窗口。业务提示音真实结束后的接话窗口保持原有行为。
+
+ASR、对话模型、TTS 或点歌取流发生明确的连接失败、DNS 故障或超时时，播放原厂 `check_internet` 网络提示音。音频随包提供，不依赖云端合成、已有缓存或原厂资源的安装路径；持续故障时 60 秒内最多播报一次，并停止本轮后续云端调用。密钥、权限、配额和歌曲资源拒绝仍按各自错误处理。无法确认扬声器已释放时不抢占播放；唤醒职责保持由原厂 Agent 管理。资源来源及格式见 [提示音说明](resource/voice/README.md)。
+
+启动语音会话时，框架会把原厂 Agent 切换为 `only_voice` 并重启；正常退出时恢复启动前的模式。管理工具优先探测 yamo，缺失时采用已核对的 HTTP 入口；写请求失败或超时不会切换后端重发。恢复记录绑定型号、SKU 和服务主机，旧格式或目标不匹配时保留记录并拒绝接管。点歌台的动作联动由技能配置控制，开启后可能产生身体运动，使用前请阅读 [点歌台说明](https://github.com/huang-kai/primeskills/blob/main/diangetai/README.md)。
 
 新开终端后，如果找不到命令，可加载：
 
@@ -122,7 +126,7 @@ primebuddy start
 source ~/.primebuddy/bin/env.sh
 ```
 
-运行语音会话的终端也需要加载上面的原厂环境。
+安装后的 `primebuddy` 入口会按 T1/Q1 自动加载对应的原厂 ROS 环境，新终端无需再次手动加载。
 
 ### 更新框架
 
@@ -277,6 +281,10 @@ rm -rf ~/.primebuddy/cfg/skills/hello ~/.primebuddy/data/hello
 
 一个 skill 最少只需要一个 `SKILL.md`。它告诉框架：这个技能叫什么、什么时候使用，以及如何完成任务。需要执行业务操作时再加脚本，需要第三方库时再加依赖。
 
+可以复制技能仓库的 [通用模板](https://github.com/huang-kai/primeskills/blob/main/templates/my-skill/SKILL.md)，并参考 [编写指南](https://github.com/huang-kai/primeskills/blob/main/templates/README.md)。目录采用常见的 `SKILL.md` 加可选 `scripts/`、`references/`、`assets/`；已有程序也可以保留自己的 `main.py`、`src/` 结构。
+
+发现技能时，模型只看到名称、简短 `description` 和位置；选中后读取完整正文，再按需读参考资料。摘要简短是为了控制发现成本，正文仍需写清使用步骤、例子、结果校验和失败处理。不要求每个技能实现 `run(context)` 等宿主函数。
+
 下面的例子在框架源码目录中操作，技能放在相邻的 `my-skills/hello/`。
 
 ### 1. 编写技能说明
@@ -301,16 +309,16 @@ metadata:
 用户提供名字后，用一句简短中文问候。
 ```
 
-`name` 使用小写字母、数字和连字符，`description` 写清用途和触发条件。只提供说明的技能，到这里就可以安装。
+`name` 使用小写字母、数字和单连字符，最多 64 字符，并与目录名一致；`description` 最多 1024 字符，写清用途和触发条件。较复杂的正文可按“何时使用、准备、执行流程、校验与反馈、失败与取消、示例、参考”组织，按业务删除无关章节。只提供说明的技能，到这里就可以安装。
 
 ### 2. 按需添加业务代码
 
-如果任务需要运行代码，可以增加 `src/greet.py`：
+如果任务需要运行代码，可以增加 `scripts/greet.py`：
 
 ```text
 hello/
 ├── SKILL.md
-└── src/
+└── scripts/
     └── greet.py
 ```
 
@@ -327,81 +335,52 @@ print('你好，' + args.name)
 
 ```text
 没有提供名字时，先询问名字。
-运行 src/greet.py，将名字作为一个命令行参数。
+运行 scripts/greet.py，将名字作为一个命令行参数。
 根据脚本的实际输出回复用户。
 ```
 
 脚本可以使用 Python、Bash 或 JavaScript，不必导入 PrimeBuddy。业务执行时通过参数接收输入，通过标准输出返回结果；不要在业务脚本中用 `input()` 等待交互。安装时的交互配置使用下方的配置向导。
 
+普通文本输出即可，不强制某种 JSON 结构。长任务可以处理标准终止信号或提供自己的停止命令，不需要为 Buddy 增加 `cancel(context)`、`shutdown(context)`。设备操作的停止与清理仍由业务程序负责，进程结束本身不代表机器人已停止。
+
 只用 Python 标准库时无需额外依赖。需要第三方库时，在技能根目录的 `requirements.txt` 中使用 `包名==版本号` 声明，安装器会将依赖放到技能自己的 `_deps/`。
 
-<details>
-<summary>技能需要安装配置向导时</summary>
+### 可选：由 Buddy 配置 CLI 调用
 
-增加 `cfg/pkg.yaml`，保存包信息并声明配置入口：
-
-```yaml
-package_name: hello
-version: "0.1.0"
-user_id: robot_local
-author: "你的名字"
-description: "问候技能"
-sdk_version: "v1.0.0"
-primebuddy:
-  setup: src/setup.py
-```
-
-`package_name` 必须与 `SKILL.md` 中的 `name` 相同。`sdk_version` 记录开发参考版本，不会要求普通技能安装机器人 SDK。
-
-在 `src/setup.py` 中实现：
-
-```python
-def setup(ui, data_dir, config):
-    greeting = ui.ask('问候用语', config.get('greeting', '你好'))
-    return {**config, 'greeting': greeting}
-```
-
-框架会在安装时调用这个函数，将返回的字典保存到 `~/.primebuddy/cfg/skills/hello/config.yaml`。重新运行 `primebuddy skill configure hello` 会调用同一向导。
-
-业务脚本可通过环境变量 `PRIMEBUDDY_SKILL_CONFIG` 获取配置文件路径，通过 `PRIMEBUDDY_SKILL_DATA` 获取私有数据目录。账号和登录态保存在数据目录中。
-
-如果已有独立的交互配置脚本，也可以用 `configure: [src/configure.py]` 代替 `setup`；两种入口选择一种即可。
-
-</details>
-
-<details>
-<summary>技能需要共享框架音频或任务取消功能时</summary>
-
-可以使用原生工具适配，在 `cfg/pkg.yaml` 中声明具名函数：
+普通脚本只需在 `SKILL.md` 写清命令。需要具名动作、参数校验、资源互斥或更具体的硬超时时，在 **Buddy 的** `~/.primebuddy/cfg/skill-adapters.yaml` 添加可选映射，例如：
 
 ```yaml
-primebuddy:
-  entrypoint: src/actions.py
+hello:
   actions:
     greet:
+      command: [scripts/greet.py, '{name}']
       parameters:
         name: {type: string}
       resources: []
+      timeout_seconds: 30
+      description: 正在问候 {name}
 ```
 
-`src/actions.py`：
+`command` 是技能内脚本和参数列表，不是 shell 字符串。模板只替换已声明参数和 `{config}`、`{data}`、`{runtime}`；模型不能改脚本入口、资源或执行期限。未适配的通用脚本默认共用 `skill.scripts`，硬期限为 600 秒。已适配的技能只暴露声明动作，避免从原始脚本入口绕过资源和清理约束。
 
-```python
-def greet(context, name):
-    context.checkpoint()
-    return '你好，' + name
-```
+点歌台和易来的默认映射见 [skill-adapters.example.yaml](cfg/skill-adapters.example.yaml)。用户配置按技能名称替换默认条目，值设为 `null` 可禁用该适配。`configure` 可映射技能自己的交互式配置命令；`context`、动作的 `preflight`、`confirmation` 可映射已有的只读查询或预览命令。它们都是可选 CLI 用法，不要求技能实现同名 Python 函数。配置与登录只在 Console 进行。
 
-框架会用 `greet(context=context, name=...)` 调用业务函数。长任务可通过 `context.checkpoint()` 响应取消，播放音频可使用 `context.audio`。实现示例见 [点歌台源码](https://github.com/huang-kai/primeskills/blob/main/diangetai/src/skill.py)。
+设备程序应自行处理标准终止信号和原厂业务收尾。对需要确认外部设备释放的技能，可以配置 `status` 和 `recover` 命令：前者返回实际状态，后者执行技能自身提供的恢复操作。Buddy 仅在状态查询返回 `status: success`、`resources_released: true` 后解除隔离；查询失败、超时或无法确认均保留私有记录，阻止占用相关资源。普通文本 CLI 不需要使用这组可选 JSON 字段。
 
-</details>
+旧包的 `entrypoint/actions` 和可选 hooks 继续通过一次性 worker 子进程兼容，业务模块不再导入 Buddy 主进程；它们仍属于旧宿主协议，且同样只暴露已声明动作。新的点歌台和易来已迁移普通 CLI，不采用这条路径。
+
+### 进程期限与取消
+
+每次执行有独立进程组、任务和所属轮次 ID，以及私有输出文件和执行记录。硬期限届满或本轮取消时，监督器依次发送 SIGINT、SIGTERM、SIGKILL，默认宽限分别为 3、2、2 秒，并核对进程清理结果。点歌适配将首段宽限设为 25 秒，容纳订阅匹配、原厂停止请求与状态确认；可通过宿主动作的 `stop_grace_seconds` 配置三段有界宽限。技能无需实现 Buddy 的取消函数。当前会追踪已观察到的后代，包括另建进程组的子进程；首次采样前瞬间脱离父子关系的进程仍有边界，当前没有 cgroup/subreaper 隔离或重启接管保证。
+
+进程退出与机器人业务结束分别确认。点歌正常完成等待原厂 `PlayMediaFile` 的播放生命周期；取消或异常后检查技能自身恢复记录，必要时调用它的恢复命令。设备清理未确认时，语音会话退出且不播报、不启动新任务；启动首次播报前也会检查遗留状态。执行记录用于审计，不会自动重放上一次命令。
 
 ### 3. 验证并安装
 
 添加脚本后，先直接运行，确认业务结果：
 
 ```bash
-python3 ../my-skills/hello/src/greet.py 张三
+python3 ../my-skills/hello/scripts/greet.py 张三
 ```
 
 再安装到框架，检查是否被发现：
@@ -489,6 +468,8 @@ bash scripts/test.sh
 源码目录中，`cfg/` 放公开配置模板，`src/` 放代码，`resource/` 放正式资源，`tests/` 放主要测试，`scripts/` 放安装和开发脚本。`docs/` 暂时只作为本地开发资料，不提交 Git。测试录音、生成的发布包、API Key 和账号登录态也不提交。
 
 报告问题时，请附上版本、复现步骤和必要的日志，隐去密钥和账号信息。涉及机器人运动的验证，应单独说明测试环境和安全条件。
+
+技能若占用扬声器，在 Buddy 侧适配的 `resources` 中声明 `speaker.music`（或 `speaker`）。框架统一把 `speaker.*` 视为同一资源，在音乐任务真实完成前推迟其他任务的语音播报，同时继续处理 ROS 事件。skill 必须等待原厂媒体自然结束及有界清理后返回，不能把播放请求已接受当作执行成功。业务程序在正常退出和标准信号处理过程中关闭自己持有的客户端；框架不需要了解其 SDK 实现。
 
 ## 开源协议
 

@@ -6,14 +6,15 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-from primebuddy.integrations.t1 import native_agent as agent
-from primebuddy.integrations.t1.robot_audio import AudioError, audio_session
+from primebuddy.integrations.primebot import native_agent as agent
+from primebuddy.integrations.primebot.robot_audio import AudioError, audio_session
 import sys
 from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
-from primebuddy.integrations.t1.sdk_bridge import ENDPOINTS, SdkBridge, sdk_types
+from primebuddy.integrations.primebot.sdk_bridge import ENDPOINTS, SdkBridge, sdk_types
 from primebuddy.config.storage import SetupError
-from primebuddy.integrations.t1.native_voice import NativeVoiceInput
+from primebuddy.integrations.primebot.native_voice import NativeVoiceInput
+from primebuddy.providers.errors import TtsNetworkError
 
 
 class AgentRecoveryTests(unittest.TestCase):
@@ -28,7 +29,7 @@ class AgentRecoveryTests(unittest.TestCase):
         self.fail_restart = False
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
-        for name, impl in [('agent_backend', lambda _: 'http'), ('agent_rpc', self.rpc),
+        for name, impl in [('agent_backend', lambda _: 'http'), ('agent_target', lambda: {'series': 'T1', 'sku': 'T1-2X', 'host': 'local'}), ('agent_rpc', self.rpc),
                            ('agent_mode', self.read_write), ('restart_agent', self.restart),
                            ('confirm_agent', self.confirm)]:
             self.stack.enter_context(patch.object(agent, name, side_effect=impl))
@@ -36,7 +37,7 @@ class AgentRecoveryTests(unittest.TestCase):
 
     def save(self, previous='normal', **changes):
         data = dict(previous_running=True, previous_mode=previous,
-                    purpose='music_session', backend='http')
+                    purpose='music_session', backend='http', target={'series': 'T1', 'sku': 'T1-2X', 'host': 'local'})
         data.update(changes)
         self.record.write_text(json.dumps(data))
         return self.record.read_bytes()
@@ -137,7 +138,7 @@ class AgentRecoveryTests(unittest.TestCase):
 
     def test_invalid_records_never_change_agent(self):
         for changes in ({'previous_mode': 'unknown'}, {'previous_running': False},
-                        {'purpose': 'unknown'}, {'backend': 'aima'}):
+                        {'purpose': 'unknown'}, {'backend': 'aima'}, {'target': {'series': 'Q1'}}):
             with self.subTest(changes=changes):
                 original = self.save(**changes)
                 with self.assertRaises(AudioError):
@@ -357,6 +358,18 @@ class BridgeTests(unittest.TestCase):
         self.submit()
         self.bridge.drain(Mock(side_effect=RuntimeError('failed')), mic)
         self.assertIsNone(self.bridge.pending)
+        self.assertEqual(mic.phase, 'waiting')
+        self.assertTrue(self.submit().tts_resp.is_success)
+
+    def test_network_failure_releases_slot_and_propagates_to_offline_notice(self):
+        mic = NativeVoiceInput(None, NS(node=self.node))
+        mic.listen(0)
+        self.bridge.busy = False
+        self.submit()
+        with self.assertRaises(TtsNetworkError):
+            self.bridge.drain(Mock(side_effect=TtsNetworkError()), mic)
+        self.assertIsNone(self.bridge.pending)
+        self.assertFalse(self.bridge.busy)
         self.assertEqual(mic.phase, 'waiting')
         self.assertTrue(self.submit().tts_resp.is_success)
 

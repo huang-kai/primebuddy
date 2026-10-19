@@ -1,53 +1,39 @@
 """唯一语音会话：复用已验证的底层音频实现，不调用旧技能会话。"""
 import logging
 import queue
-import re
 import time
 
-from primebuddy.core.engine import execute
+from primebuddy.core.engine import execute, CleanupUnconfirmed
 from primebuddy.core.planner import plan, continue_plan
 from primebuddy.core.grounding import vocabulary, confirmation_for, confirmation_answer
-from primebuddy.voice.speech_cache import SpeechCache
+from primebuddy.voice.speech_cache import SpeechCache, NETWORK_ERROR_PROMPT
+from primebuddy.providers.errors import ProviderNetworkError
 from primebuddy.core.timing import measure
 
 logger = logging.getLogger(__name__)
 
 
-def wake_command(text):
-    """双唤醒词开始新请求；只识别句首/句界，避免改写指令中的人名或歌名。"""
-    # 先跳过明确引用的歌名/文本，再查找句界上的唤醒词。
-    matches = [match for match in re.finditer(
-        r'《[^》]*》|“[^”]*”|"[^"]*"|'
-        r'(?P<wake>(?:^|[。！？!?])\s*(?:(?:[元源袁][仔崽]|冤哉|原在)[\s，,。！？!?]*){2,})',
-        text) if match.group('wake') is not None]
-    if matches:
-        # 允许“旧话。元仔元仔，新指令”；唤醒前的内容不再参与新一轮计划。
-        return True, text[matches[-1].end():].strip(' \t\r\n，,。！？!?：:')
-    compact = re.sub(r'[，,。！？!?\s]', '', text)
-    if re.fullmatch(r'[元源][仔崽]', compact):
-        return True, ''
-    # 单个“袁仔”“原在”等有其他含义，不能仅凭近音就删除。
-    return False, text
-
-
 def serve(registry, context, sdk_bridge='namespaced'):
-    """由 start 进入 T1 会话；设备预检、互斥和模式恢复集中在此管理。"""
-    from primebuddy.integrations.t1.native_voice import NativeVoiceInput
+    """由 start 进入自动识别的机器人语音会话；设备预检、互斥和模式恢复集中在此管理。"""
+    from primebuddy.integrations.primebot.device import create_voice
     from primebuddy.voice.audio import AudioOutput
-    from primebuddy.integrations.t1.native_agent import voice_only_agent
+    from primebuddy.integrations.primebot.native_agent import voice_only_agent
     from primebuddy.providers import transcribe_wav
     from primebuddy.config.models import load_model
     from primebuddy.config.runtime import private_runtime
-    from primebuddy.integrations.t1.robot_audio import audio_session, connect_soc0, check_cancel, AudioError
-    from primebuddy.integrations.t1.speech_audio import encode_asr_wav, native_preflight
-    from primebuddy.integrations.t1.sdk_bridge import SdkBridge
+    from primebuddy.integrations.primebot.robot_audio import audio_session, connect_soc0, check_cancel, AudioError
+    from primebuddy.integrations.primebot.speech_audio import encode_asr_wav
+    from primebuddy.integrations.primebot.sdk_bridge import SdkBridge
 
+    voice = create_voice()
+    logger.info('ROBOT_VOICE %s %s', voice.device.series, voice.device.sku)
     config = load_model('asr', context.asr_model)
     llm_config = load_model('llm')
     context.runtime = private_runtime()
     context.runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
+    registry.prepare_voice(context)
     connect_soc0(context.runtime)
-    native_preflight()
+    voice.preflight()
     skill_context = {}
     vocabulary_words = vocabulary(skill_context)
     logger.info('ASR_MODEL %s:%s VOCABULARY_COUNT %s', config['provider'], config['model'], len(vocabulary_words))
@@ -60,28 +46,41 @@ def serve(registry, context, sdk_bridge='namespaced'):
         if missing:
             raise AudioError('机器人音频接口未就绪：' + '、'.join(missing) + '。未接管原厂 Agent。')
 
-        context.audio = AudioOutput(context.runtime, context.checkpoint)
+        audio_output = AudioOutput(context.runtime, context.checkpoint)
+        last_network_notice = None
 
         def speak(text, on_finished=None):
+            nonlocal last_network_notice
             # 下层 TTS 最长 100 字；按句拆分，所有播放均在主线程。
             if not text:
+                return
+            check_cancel()
+            registry.check_resources(context, {'speaker'})
+            network_notice = text == NETWORK_ERROR_PROMPT
+            if network_notice and last_network_notice is not None and time.monotonic() - last_network_notice < 60:
+                logger.info('NETWORK_NOTICE suppressed')
+                if on_finished is not None:
+                    on_finished()
                 return
             logger.info('TTS %s', text)
             with measure('播报总耗时'):
                 for offset in range(0, len(text), 90):
+                    check_cancel()
                     path = speech.prepare(text[offset:offset + 90])
                     with measure('提示音传输与播放'):
                         try:
                             if on_finished is not None and offset + 90 >= len(text):
-                                context.audio.play(path, on_finished=on_finished, checkpoint=robot.spin)
+                                audio_output.play(path, on_finished=on_finished, checkpoint=robot.spin)
                             else:
-                                context.audio.play(path, checkpoint=robot.spin)
+                                audio_output.play(path, checkpoint=robot.spin)
                         except AudioError as error:
                             logger.error('AUDIO_ERROR %s', str(error))
                             raise
+            if network_notice:
+                last_network_notice = time.monotonic()
 
         with voice_only_agent(context.runtime):
-            microphone = NativeVoiceInput(context.runtime, robot)
+            microphone = voice.microphone(context.runtime, robot)
             bridge = None if sdk_bridge == 'off' else SdkBridge(
                 robot.node, sdk_bridge,
                 available=lambda: microphone.phase in ('listening', 'waiting')
@@ -99,6 +98,13 @@ def serve(registry, context, sdk_bridge='namespaced'):
                     raise microphone.error
                 if bridge and bridge.publisher is not None:
                     bridge.check()
+
+            def cleanup_checkpoint():
+                # 清理期间继续处理原厂订阅；不清除取消状态、不开始新任务或播报。
+                robot.spin(cancellable=False)
+                microphone.check_health()
+                if microphone.error:
+                    raise microphone.error
             try:
                 microphone.start()
                 deadline = time.monotonic() + 10
@@ -113,14 +119,25 @@ def serve(registry, context, sdk_bridge='namespaced'):
                         checkpoint()
                     bridge.start()
                     logger.info('SDK_BRIDGE %s %s', bridge.topic, bridge.service_name)
-                ask('PrimeBuddy 已启动，你想做什么？', microphone.generation)
-                logger.info('VOICE_WINDOW_OPEN 30s · 等待原厂 VAD 音频')
+                try:
+                    speak('PrimeBuddy 已启动，你想做什么？')
+                except ProviderNetworkError:
+                    speak(NETWORK_ERROR_PROMPT)
+                microphone.wait_for_listening(microphone.generation)
+                logger.info('VOICE_WAITING_FOR_NATIVE_LISTENING startup')
                 while True:
                     if bridge:
                         bridge.busy = False
                     checkpoint()
                     if bridge:
-                        bridge.drain(speak, microphone)
+                        try:
+                            bridge.drain(speak, microphone)
+                        except ProviderNetworkError:
+                            check_cancel()
+                            history.clear()
+                            pending_plan = None
+                            ask(NETWORK_ERROR_PROMPT, microphone.generation)
+                            continue
                     try:
                         generation, kind, audio = microphone.events.get_nowait()
                     except queue.Empty:
@@ -130,18 +147,19 @@ def serve(registry, context, sdk_bridge='namespaced'):
                     if kind == 'timeout':
                         history.clear()
                         pending_plan = None
-                        microphone.wait_for_wake(generation)
-                        logger.info('VOICE_WAITING_FOR_WAKE %s', audio or 'silence')
+                        microphone.wait_for_listening(generation)
+                        logger.info('VOICE_WAITING_FOR_NATIVE_LISTENING %s', audio or 'silence')
                         continue
-                    if kind == 'wake':
-                        # 原厂前端负责唤醒回应；不追加第二段 TTS，也不重置已开始的收音。
+                    if kind == 'native_listening':
+                        # 原厂已开放监听；不声称检测到唤醒，也不追加 TTS 或重置收音。
                         history.clear()
                         pending_plan = None
-                        logger.info('VOICE_WINDOW_OPEN 30s after wake')
+                        logger.info('VOICE_WINDOW_OPEN 30s after native listening')
                         continue
                     if bridge:
                         bridge.busy = True
                     microphone.idle(generation)
+                    context.cancelled.clear()
                     turn_started = time.monotonic()
                     logger.info('VOICE_PROCESSING')
                     try:
@@ -149,22 +167,13 @@ def serve(registry, context, sdk_bridge='namespaced'):
                         with measure('ASR识别'):
                             text = transcribe_wav(encode_asr_wav(audio, sample_rate=16000), config,
                                                   vocabulary=vocabulary_words)
+                        check_cancel()
                         logger.info('ASR %s', text)
-                        woken, text = wake_command(text)
-                        if woken:
-                            history.clear()
-                            pending_plan = None
-                            logger.info('VOICE_WAKE_TEXT %s', 'command' if text else 'listen')
-                        if woken and not text:
-                            microphone.listen(generation)
-                            logger.info('VOICE_WINDOW_OPEN 30s after wake text')
-                            continue
                         if bridge:
                             bridge.publish_asr(text)
                         if text.strip('。！？!? ') in {'退出助手', '退出语音助手'}:
                             speak('语音助手已退出。')
                             return
-                        context.cancelled.clear()
                         answer = confirmation_answer(text)
                         if pending_plan is not None and answer is False:
                             pending_plan = None
@@ -176,6 +185,7 @@ def serve(registry, context, sdk_bridge='namespaced'):
                             proposal, pending_plan = pending_plan, None
                         else:
                             pending_plan = None
+                            check_cancel()
                             with measure('LLM计划'):
                                 proposal = plan(text, registry, llm_config, history, skill_context, context=context)
                         logger.info('PLAN_READY_SECONDS %s', round(time.monotonic() - turn_started, 3))
@@ -193,9 +203,13 @@ def serve(registry, context, sdk_bridge='namespaced'):
                                     break
                             confirmed = False
                             with measure('任务执行与反馈'):
-                                results = execute(proposal, registry, context, speak, checkpoint=checkpoint)
+                                results = execute(proposal, registry, context, speak, checkpoint=checkpoint,
+                                                  cleanup_checkpoint=cleanup_checkpoint)
                             executed = True
                             history.clear()
+                            check_cancel()
+                            if any(result.get('error_code') == 'network_unavailable' for result in results.values()):
+                                raise ProviderNetworkError('技能网络连接失败')
                             with measure('Agent结果回传'):
                                 proposal = continue_plan(proposal, results, registry)
                         if pending_plan is not None:
@@ -208,6 +222,19 @@ def serve(registry, context, sdk_bridge='namespaced'):
                                             {'role': 'assistant', 'content': proposal['reply']}])
                             history = history[-6:]
                             ask(proposal['reply'] or '请告诉我你想做什么。', generation)
+                    except CleanupUnconfirmed:
+                        logger.error('VOICE_CLEANUP_UNCONFIRMED 已停止接收新任务，设备资源释放未确认。')
+                        raise
+                    except ProviderNetworkError as error:
+                        check_cancel()
+                        # execute 仅在清理完成后传播原异常；隔离检查仍须先于恢复播报。
+                        registry.check_resources(context, {'speaker'})
+                        context.cancelled.clear()
+                        logger.error('TURN_NETWORK_ERROR %s', type(error).__name__)
+                        history.clear()
+                        pending_plan = None
+                        microphone.idle(generation)
+                        ask(NETWORK_ERROR_PROMPT, generation)
                     except Exception as error:
                         check_cancel()
                         logger.error('TURN_ERROR %s', type(error).__name__)
@@ -216,7 +243,10 @@ def serve(registry, context, sdk_bridge='namespaced'):
                         history.clear()
                         pending_plan = None
                         microphone.idle(generation)
-                        ask('本轮未能完整完成，执行结果请以实际状态为准。请重新告诉我你的要求。', generation)
+                        try:
+                            ask('本轮未能完整完成，执行结果请以实际状态为准。请重新告诉我你的要求。', generation)
+                        except ProviderNetworkError:
+                            ask(NETWORK_ERROR_PROMPT, generation)
                     logger.info('TURN_SECONDS %s', round(time.monotonic() - turn_started, 3))
                     logger.info('VOICE_WINDOW_OPEN 30s · 等待原厂 VAD 音频')
             finally:
@@ -228,5 +258,4 @@ def serve(registry, context, sdk_bridge='namespaced'):
                     try:
                         microphone.close()
                     finally:
-                        context.audio.close()
-                        context.audio = None
+                        audio_output.close()

@@ -9,8 +9,9 @@ import wave
 
 from primebuddy.providers.errors import AsrError
 from primebuddy.config.models import load_model
-from primebuddy.integrations.t1.robot_audio import SOC0, require_jetson, ssh_options
+from primebuddy.integrations.primebot.robot_audio import require_robot, ssh_options
 
+from .device import host_command
 from primebuddy.config.runtime import RUNTIME
 SOURCE = 'alsa_input.platform-aw89403_sound.pro-input-0'
 RATE = 48000
@@ -19,7 +20,7 @@ FRAME_BYTES = FRAME_SAMPLES * 8 * 2
 
 
 def preflight(robot=None):
-    require_jetson()
+    require_robot()
     load_model('asr')
     capture_publishers = robot.node.count_publishers('/aima/hal/audio/capture') if robot is not None else 0
     code = (
@@ -39,8 +40,7 @@ def preflight(robot=None):
                 'd=json.load(urllib.request.urlopen("http://127.0.0.1:50080/json/get_all_apps_info",timeout=8));'
                 'a=d["data"]["agent"];'
                 'print(json.dumps({"agent_status":a["status"],"agent_pid":a["pid"]}))')
-    result = subprocess.run(['ssh', '-T', *ssh_options(RUNTIME), SOC0,
-                             'python3 -c ' + shlex.quote(code)],
+    result = subprocess.run(host_command(RUNTIME, 'python3 -c ' + shlex.quote(code)),
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30)
     if result.returncode:
         raise AsrError('跨板预检失败，请核对 SSH 登录和机器人连接。')
@@ -109,9 +109,11 @@ def encode_asr_wav(pcm, sample_rate=48000):
 
 def native_preflight():
     """新流程只要求原厂消息定义和云配置，不再要求原始采音或本地唤醒模型。"""
-    require_jetson()
     models = {role: load_model(role) for role in ('asr', 'llm', 'tts')}
-    from aimdk_msgs.msg import ProcessedAudioOutput, AgentConversationState
+    try:
+        from aimdk_msgs.msg import ProcessedAudioOutput, AgentConversationState
+    except ImportError:
+        raise AsrError('目标 T1/Q1 的原厂语音消息不可用，请加载该设备的 ROS 环境。') from None
     for msg_type, fields in ((ProcessedAudioOutput, {'header', 'stream_id', 'audio_vad_state', 'audio_data'}),
                              (AgentConversationState, {'main_state'})):
         if not fields.issubset(msg_type.get_fields_and_field_types()):

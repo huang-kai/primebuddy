@@ -9,13 +9,14 @@ import tempfile
 from primebuddy.voice.audio_format import MAX_BYTES, validate_wav
 from primebuddy.providers import synthesize_wav
 from primebuddy.core.timing import measure
-from primebuddy.config.storage import load_app_config
+from primebuddy.config.storage import application_directory, load_app_config
 
 logger = logging.getLogger(__name__)
 
 IDENTITY = 'custom-synthesizer-pcm16-24k-v1'
 DEFAULTS = load_app_config()['voice']
 COMMON_PROMPTS = ('PrimeBuddy 已启动，你想做什么？', '我在，请说。', '还想做什么？', '语音助手已退出。')
+NETWORK_ERROR_PROMPT = '网络连接出现了问题，请重新连接网络。'
 
 
 class SpeechCache:
@@ -32,6 +33,12 @@ class SpeechCache:
     def prepare(self, text):
         if not isinstance(text, str) or not text.strip() or len(text) > 100:
             raise ValueError('提示语须为 1 至 100 字')
+        if text == NETWORK_ERROR_PROMPT:
+            # 随安装包提供，不受缓存淘汰或云端合成是否可用的影响。
+            path = application_directory() / 'resource/voice/network-error.wav'
+            validate_wav(path.read_bytes())
+            logger.info('TTS_CACHE bundled_network_prompt')
+            return path
         key = hashlib.sha256((self.identity + '\0' + text).encode()).hexdigest()
         path = self.directory / (key + '.wav')
         with measure('TTS缓存准备'):

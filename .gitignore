@@ -23,4 +23,4 @@ dist/
 /cfg/*.yaml
 !/cfg/*.example.yaml
 /cfg/skills/
-/docs
+/design

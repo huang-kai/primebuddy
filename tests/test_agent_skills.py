@@ -203,7 +203,7 @@ sys.exit(1)
         registry = self.script_registry('raise AssertionError("不应运行")\n')
         proposal = {'reply': '', 'tasks': [{'id': 'one', 'skill': 'hello', 'action': 'script',
                      'args': {'path': 'src/task.py', 'arguments': []}, 'after': []}]}
-        with patch('primebuddy.skills.runtime.subprocess.Popen') as process:
+        with patch('primebuddy.skills.runtime.run_process') as process:
             result = execute(proposal, registry, Context(), lambda _: None)
         process.assert_not_called()
         self.assertTrue(result['one']['simulated'])
@@ -228,8 +228,9 @@ finally:
         thread = threading.Thread(target=cancel)
         thread.start()
         try:
-            with self.assertRaisesRegex(RuntimeError, '取消'):
-                run_script(registry.skills['hello'], {'path': 'src/task.py', 'arguments': []}, context)
+            result = run_script(registry.skills['hello'], {'path': 'src/task.py', 'arguments': []}, context)
+            self.assertEqual(result['status'], 'failed')
+            self.assertEqual(result['termination_reason'], 'cancelled')
         finally:
             thread.join(4)
         self.assertTrue(cleaned.exists())

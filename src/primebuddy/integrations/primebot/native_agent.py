@@ -9,8 +9,9 @@ import shlex
 import subprocess
 import time
 
-from primebuddy.integrations.t1.robot_audio import AudioError, SOC0, ssh_options, check_cancel
+from primebuddy.integrations.primebot.robot_audio import AudioError, check_cancel
 from primebuddy.core.timing import progress
+from .device import host_command, detect_device, audio_host
 
 logger = logging.getLogger(__name__)
 
@@ -26,29 +27,18 @@ else:
 '''
 
 
-def backend_for_version(version):
-    match = re.fullmatch(r'v(\d+)d(\d+)', version)
-    if match is None:
-        raise AudioError('硬件版本格式未知，未猜测原厂 Agent 启停方式。')
-    return 'http' if tuple(map(int, match.groups())) >= (2, 1) else 'aima'
-
-
 def agent_backend(runtime):
-    result = subprocess.run(['ssh', '-T', *ssh_options(runtime), SOC0,
-                             'cat /robot/data/info/hardware_version'],
+    result = subprocess.run(host_command(runtime, 'command -v yamo'),
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=18)
-    if result.returncode:
-        raise AudioError('未读取到播放板硬件版本，未启停原厂 Agent。')
-    version = result.stdout.decode().strip()
-    backend = backend_for_version(version)
-    progress(f'硬件版本 {version}，原厂 Agent 管理方式：{backend}。')
-    return backend
+    if result.returncode not in (0, 1):
+        raise AudioError('无法探测 Agent 管理工具，未启停原厂 Agent。')
+    return 'yamo' if result.returncode == 0 and result.stdout.strip() else 'http'
 
 
 def parse_doctor_state(output):
     # 只解析agent行，不输出doctor中其他应用的信息；不认识的格式拒绝接管。
     output = re.sub(r'\x1b\[[0-9;]*m', '', output)
-    rows = [line for line in output.splitlines() if re.match(r'^\s*\|?\s*agent(?:\s|\|)', line)]
+    rows = [line for line in output.splitlines() if re.match(r'^\s*[│|]?\s*agent(?:\s|[│|])', line)]
     if len(rows) != 1:
         raise AudioError('aima em doctor 未返回唯一的 Agent 状态行。')
     running = re.search(r'\bRunning\((\d+)\)', rows[0])
@@ -60,22 +50,20 @@ def parse_doctor_state(output):
 
 
 def agent_rpc(runtime, operation, backend='http'):
-    if operation not in {'state', 'start', 'stop'} or backend not in {'http', 'aima'}:
+    if operation not in {'state', 'start', 'stop'} or backend not in {'http', 'yamo'}:
         raise AudioError('原厂 Agent 管理请求无效。')
-    if backend == 'http':
+    if operation == 'state' or backend == 'http':
         command = 'python3 -c ' + shlex.quote(RPC_CODE) + ' ' + shlex.quote(operation)
     else:
-        # 在播放板执行CLI；退出恢复使用同一后端，不回退到另一套管理接口。
-        cli = 'doctor' if operation == 'state' else operation + '-app agent'
-        command = 'source /robot/etc/basic_env && aima em ' + cli
-    result = subprocess.run(['ssh', '-T', *ssh_options(runtime), SOC0, command],
+        command = 'yamo em ' + operation + '-app agent'
+    result = subprocess.run(host_command(runtime, command),
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=18)
     if result.returncode:
-        raise AudioError('原厂 Agent 管理连接或命令失败。')
-    if backend == 'http':
+        raise AudioError('原厂 Agent 管理连接或命令失败；结果未知，未切换后端重发。')
+    if operation == 'state' or backend == 'http':
         data = json.loads(result.stdout)
     else:
-        data = parse_doctor_state(result.stdout.decode()) if operation == 'state' else {'status': 'success'}
+        data = {'status': 'success'}
     if operation != 'state' and data.get('status') != 'success':
         raise AudioError('原厂 Agent 启停请求失败。')
     logger.info('%s %s', 'AGENT_' + operation.upper(), json.dumps(data))
@@ -99,12 +87,10 @@ def confirm_agent(runtime, running, backend='http'):
 def agent_mode(runtime, value=None):
     # 每次调用使用独立进程，重启 Agent 后不会复用旧 ROS 服务句柄。
     source = Path(__file__).with_name('agent_mode_rpc.py').read_text()
-    command = ('source /robot/etc/basic_env >/dev/null 2>&1 && '
-               'source /robot/software/app_proxy/bin/setup.bash >/dev/null 2>&1 && '
-               'python3 -c ' + shlex.quote(source))
+    command = 'python3 -c ' + shlex.quote(source)
     if value is not None:
         command += ' ' + shlex.quote(value)
-    result = subprocess.run(['ssh', '-T', *ssh_options(runtime), SOC0, command],
+    result = subprocess.run(host_command(runtime, command, ros=True),
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=75)
     if result.returncode:
         raise AudioError('原厂 Agent 模式调用失败；请核对恢复记录。')
@@ -114,13 +100,32 @@ def agent_mode(runtime, value=None):
         raise AudioError('原厂 Agent 模式响应格式无效。') from None
 
 
+def confirmed_mode(runtime, expected):
+    for attempt in range(3):
+        try:
+            value = agent_mode(runtime)
+        except (AudioError, subprocess.TimeoutExpired):
+            if attempt == 2:
+                raise
+            time.sleep(5)
+            continue
+        if value != expected:
+            raise AudioError('重启后未确认 ' + expected + '，模式读回不一致')
+        return value
+
+
+def agent_target():
+    device = detect_device()
+    return dict(series=device.series, sku=device.sku, host=audio_host())
+
+
 def restart_agent(runtime, backend):
     agent_rpc(runtime, 'stop', backend)
     confirm_agent(runtime, False, backend)
     agent_rpc(runtime, 'start', backend)
     confirm_agent(runtime, True, backend)
     # 进程 Running 早于服务发现稳定；后续模式读回另建 ROS 客户端。
-    time.sleep(5)
+    time.sleep(20)
 
 
 def restore_agent(runtime, previous, backend):
@@ -137,8 +142,7 @@ def restore_agent(runtime, previous, backend):
         phase = '重启 Agent'
         restart_agent(runtime, backend)
         phase = '读回原模式'
-        if agent_mode(runtime) != previous:
-            raise AudioError('模式读回不一致')
+        confirmed_mode(runtime, previous)
         phase = '完成恢复记录'
         (runtime / 'agent_mode.json').unlink()
     except Exception as error:
@@ -157,6 +161,7 @@ def voice_only_agent(runtime):
         if (runtime / name).exists():
             raise AudioError('存在其他工具的恢复记录 ' + name + '，须先由对应工具恢复，未接管。')
     backend = agent_backend(runtime)
+    target = agent_target()
     previous = None
     if record.exists():
         try:
@@ -165,7 +170,8 @@ def voice_only_agent(runtime):
             raise AudioError('Agent 恢复记录无法读取，已保留；请检查 agent_mode.json。') from None
         if (not isinstance(saved, dict) or saved.get('previous_running') is not True
                 or saved.get('previous_mode') not in ('normal', 'only_voice')
-                or saved.get('purpose') != 'music_session' or saved.get('backend') != backend):
+                or saved.get('purpose') != 'music_session' or saved.get('backend') != backend
+                or saved.get('target') != target):
             raise AudioError('Agent 恢复记录与当前设备不匹配，已保留，未修改原厂状态。')
         previous = saved['previous_mode']
         progress('发现上次未完成的会话，直接继续接管 only_voice；保留原始模式：' + previous)
@@ -183,7 +189,7 @@ def voice_only_agent(runtime):
         fd = os.open(record, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, 'w') as output:
             json.dump({'previous_running': True, 'previous_mode': previous,
-                       'purpose': 'music_session', 'backend': backend}, output)
+                       'purpose': 'music_session', 'backend': backend, 'target': target}, output)
             output.flush()
             os.fsync(output.fileno())
     try:
@@ -193,7 +199,7 @@ def voice_only_agent(runtime):
         # 属性读回不证明重启已经生效；中断重入也只做这一轮 only_voice 重启。
         agent_mode(runtime, 'only_voice')
         restart_agent(runtime, backend)
-        if agent_mode(runtime) != 'only_voice':
+        if confirmed_mode(runtime, 'only_voice') != 'only_voice':
             raise AudioError('重启后未确认 only_voice，未开始点歌。')
         yield
     finally:

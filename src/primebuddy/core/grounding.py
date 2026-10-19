@@ -7,7 +7,7 @@ def normalized(text):
 
 
 def vocabulary(snapshot):
-    words = ['元仔', 'PrimeBuddy']
+    words = []
     for value in snapshot.values():
         if value.get('status') == 'success':
             words.extend(word for word in value.get('vocabulary', []) if isinstance(word, str) and word.strip())
@@ -17,18 +17,19 @@ def vocabulary(snapshot):
 def confirmation_for(plan, registry, text, snapshot):
     questions = []
     for task in plan['tasks']:
-        if task['action'] == 'script':
-            continue
-        guard = getattr(registry.load(task['skill']), 'confirmation', None)
-        if guard:
-            question = guard(task['action'], task['args'], text, snapshot.get(task['skill'], {}))
-            if question:
-                questions.append(question)
-    if not questions:
+        guard = getattr(registry.load(task['skill']), 'confirmation', None) if task['action'] != 'script' else None
+        question = guard(task['action'], task['args'], text, snapshot.get(task['skill'], {})) if guard else None
+        if question is not None and not isinstance(question, str):
+            raise ValueError('技能确认内容须为文本或空值。')
+        questions.append(question)
+    if not any(questions):
         return None
     # 多技能整轮等待，不提前播放音乐或执行其他副作用。
-    descriptions = [registry.load(t['skill']).describe(t['action'], t['args']).removeprefix('正在')
-                    for t in plan['tasks']]
+    descriptions = []
+    for task, question in zip(plan['tasks'], questions):
+        description = question or registry.load(task['skill']).describe(task['action'], task['args'])
+        description = description.strip().removeprefix('请确认').lstrip('：: ').removeprefix('正在')
+        descriptions.append(description.rstrip('。！？!? '))
     return '请确认：' + '，并且'.join(descriptions) + '？请说“确认”或“取消”。'
 
 

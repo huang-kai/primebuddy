@@ -1,6 +1,7 @@
 """工具循环回归：按需加载、执行回传、确认前暂停和失败后不重试。"""
 import copy
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -23,21 +24,29 @@ class AgentLoopTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        environment = patch.dict(os.environ, PRIMEBUDDY_HOME=str(self.root / 'home'))
+        environment.start()
+        self.addCleanup(environment.stop)
         source = self.root / 'hello'
         (source / 'src').mkdir(parents=True)
         (source / 'cfg').mkdir()
         (source / 'SKILL.md').write_text('---\nname: hello\ndescription: 问候\n---\n仅被选中后才加载的正文。')
         write_config(source / 'cfg/pkg.yaml', {'primebuddy': {'entrypoint': 'src/actions.py', 'actions': {
             'hello': {'parameters': {'name': {'type': 'string'}}, 'resources': []}}}})
-        (source / 'src/actions.py').write_text('''def hello(context, name):
+        self.actions = source / 'src/actions.py'
+        self.calls = self.root / 'action-calls'
+        self.actions.write_text('''from pathlib import Path
+def hello(context, name):
     context.checkpoint()
+    with Path(%r).open('a') as output: output.write(name + '\\n')
     return '你好，' + name
 
 def planning_context(context):
     return {'status': 'success', 'vocabulary': ['世界']}
-''')
+''' % str(self.calls))
         self.registry = Registry(self.root)
-        self.context = Context()
+        self.addCleanup(self.registry.close)
+        self.context = Context(runtime=self.root / 'runtime')
         self.task = {'id': 'one', 'skill': 'hello', 'action': 'hello', 'args': {'name': '世界'}, 'after': []}
 
     def responses(self):
@@ -104,17 +113,19 @@ def planning_context(context):
                 plan('测试', self.registry)
 
     def test_confirmation_pauses_actual_write_and_resume_keeps_same_tool_call(self):
-        module = self.registry.load('hello').native_module()
-        module.confirmation = lambda *args: '需确认'
+        confirmation = self.root / 'confirmation-called'
+        with self.actions.open('a') as source:
+            source.write('\ndef confirmation(action, args, text, snapshot):\n'
+                         '    Path(%r).write_text(text)\n    return "需确认"\n' % str(confirmation))
         with patch('primebuddy.core.planner.chat', side_effect=[*self.responses(), {'role': 'assistant', 'content': '完成'}]):
             proposal = plan('问候世界', self.registry, context=self.context)
-            with patch.object(module, 'hello', wraps=module.hello) as action:
-                self.assertIn('确认', confirmation_for(proposal, self.registry, '问候世界', {}))
-                action.assert_not_called()
-                self.assertEqual(proposal.call_id, 'execute')
-                results = execute(proposal, self.registry, self.context, lambda _: None)
-                continue_plan(proposal, results, self.registry)
-                action.assert_called_once()
+            self.assertIn('确认', confirmation_for(proposal, self.registry, '问候世界', {}))
+            self.assertEqual(confirmation.read_text(), '问候世界')
+            self.assertFalse(self.calls.exists())
+            self.assertEqual(proposal.call_id, 'execute')
+            results = execute(proposal, self.registry, self.context, lambda _: None)
+            continue_plan(proposal, results, self.registry)
+            self.assertEqual(self.calls.read_text().splitlines(), ['世界'])
 
     def test_failed_result_is_returned_but_cannot_trigger_automatic_retry(self):
         retry = tool('execute_tasks', {'tasks': [dict(self.task, id='retry')]}, 'retry')

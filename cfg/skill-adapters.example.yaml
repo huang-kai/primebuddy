@@ -1,0 +1,34 @@
+# Buddy 的可选宿主适配；技能本身只提供普通 CLI。
+# ~/.primebuddy/cfg/skill-adapters.yaml 可替换同名条目，null 禁用该适配。
+diangetai:
+  configure: [main.py, --config, '{config}', --data-dir, '{data}', --runtime-dir, '{runtime}', configure]
+  context: [main.py, --config, '{config}', --data-dir, '{data}', --runtime-dir, '{runtime}', context]
+  status: [main.py, --config, '{config}', --data-dir, '{data}', --runtime-dir, '{runtime}', status]
+  recover: [main.py, --config, '{config}', --data-dir, '{data}', --runtime-dir, '{runtime}', recover]
+  actions:
+    play:
+      command: [main.py, --config, '{config}', --data-dir, '{data}', --runtime-dir, '{runtime}', play, '--artist={artist}', '--song={song}']
+      parameters:
+        artist: {type: string, default: ''}
+        song: {type: string, default: ''}
+      resources: [speaker.music, robot.motion, robot.expression, robot.lights]
+      timeout_seconds: 900
+      stop_grace_seconds: [25, 2, 2]
+      preflight: [main.py, --config, '{config}', --data-dir, '{data}', --runtime-dir, '{runtime}', check-play, '--artist={artist}', '--song={song}']
+      description: 正在播放音乐：{artist} {song}
+yeelight:
+  configure: [main.py, --config, '{config}', --data-dir, '{data}', --runtime-dir, '{runtime}', configure]
+  context: [main.py, --config, '{config}', --data-dir, '{data}', --runtime-dir, '{runtime}', context]
+  actions:
+    set_power:
+      command: [main.py, --config, '{config}', --data-dir, '{data}', --runtime-dir, '{runtime}', set-power, --power, '{power}', '--scope={scope}', '--room={room}', '--device={device}']
+      parameters:
+        power: {type: boolean}
+        scope: {type: string, enum: [device, room, home]}
+        room: {type: string}
+        device: {type: string}
+      resources: [yeelight.home]
+      timeout_seconds: 60
+      preflight: [main.py, --config, '{config}', --data-dir, '{data}', --runtime-dir, '{runtime}', check-power, --power, '{power}', '--scope={scope}', '--room={room}', '--device={device}']
+      confirmation: [main.py, --config, '{config}', --data-dir, '{data}', --runtime-dir, '{runtime}', preview-power, --power, '{power}', '--scope={scope}', '--room={room}', '--device={device}', '--text={request_text}']
+      description: 正在控制灯光

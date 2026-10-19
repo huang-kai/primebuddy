@@ -173,12 +173,21 @@ def install_dependencies(root, dependencies):
 
 
 def run_setup(root, data, ui):
+    from primebuddy.skills.adapters import adapt_metadata, command_arguments
+    data = adapt_metadata(data, root)
     name = data['name']
     if data.get('configure'):
         from primebuddy.skills.runtime import script_command, skill_environment
         environment = skill_environment(root, name)
         # Console 自己读取、保存配置；继承终端，不截获扫码或隐藏输入。
-        status = subprocess.call(script_command(root, data['configure'][0], data['configure'][1:]),
+        from primebuddy.config.runtime import runtime_directory
+        values = {'config': str(config_path('config.yaml', skill=name)), 'data': str(skill_data(name)),
+                  'runtime': str(private_dir(runtime_directory() / name))}
+        if data.get('adapter'):
+            path, arguments = command_arguments(data['configure'], values)
+        else:
+            path, arguments = data['configure'][0], data['configure'][1:]
+        status = subprocess.call(script_command(root, path, arguments),
                                  cwd=root, env=environment)
         if status:
             raise SetupError('技能 Console 配置未完成，退出码：' + str(status))
@@ -227,7 +236,9 @@ def install(source, ui=None, ref=None, replace=False):
                 placed = True
                 interrupted = None
                 try:
-                    needs_setup = bool(data.get('setup') or data.get('configure'))
+                    from primebuddy.skills.adapters import adapt_metadata
+                    configured_data = adapt_metadata(data, destination)
+                    needs_setup = bool(configured_data.get('setup') or configured_data.get('configure'))
                     result = run_setup(destination, data, ui) if ui is not None or not needs_setup else None
                 except BaseException as error:
                     if old or exists:
@@ -289,7 +300,8 @@ def discover_skill_records():
         for folder in sorted(root.iterdir()):
             if folder.name.startswith('.') or not folder.is_dir() or not (folder / 'SKILL.md').is_file():
                 continue
-            data = load_skill_metadata(folder)
+            from primebuddy.skills.adapters import adapt_metadata
+            data = adapt_metadata(load_skill_metadata(folder), folder)
             name = data['name']
             if name in index:
                 if index[name]['root'].resolve() != folder.resolve():

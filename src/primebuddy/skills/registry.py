@@ -1,15 +1,18 @@
 """按 SKILL.md 发现技能；按需读取说明、资源和原生工具。"""
+from copy import deepcopy
 import os
 from pathlib import Path
 import shutil
 
 from primebuddy.config.storage import SetupError, skill_config
 from primebuddy.skills.metadata import MAX_DOCUMENT, load_skill_metadata, resolve_skill_file
+from primebuddy.skills.adapters import adapt_metadata, load_adapters
 
 
 class Registry:
     def __init__(self, root=None):
         self.skills, self.modules = {}, {}
+        adapters = load_adapters()
         if root is None:
             from primebuddy.skills.manager import discover_skill_records
             folders = [record['root'] for record in discover_skill_records().values()
@@ -19,7 +22,7 @@ class Registry:
         for folder in folders:
             if not folder.is_dir() or not (folder / 'SKILL.md').is_file():
                 continue
-            data = load_skill_metadata(folder)
+            data = adapt_metadata(load_skill_metadata(folder), folder, adapters)
             name = data['name']
             if name in self.skills:
                 raise SetupError('技能名重复：' + name)
@@ -29,8 +32,10 @@ class Registry:
             actions = dict(data['actions'])
             if 'script' in actions:
                 raise SetupError('script 为框架固定脚本动作，请为原生工具使用其他名称。')
-            actions['script'] = {'parameters': {'path': {'type': 'string'}, 'arguments': {'type': 'array'}},
-                                 'resources': ['skill.scripts']}
+            # 已装宿主适配时只暴露受约束的动作，避免另走脚本入口改路径、绕资源锁。
+            if not data.get('adapter') and not data['actions']:
+                actions['script'] = {'parameters': {'path': {'type': 'string'}, 'arguments': {'type': 'array'}},
+                                     'resources': ['skill.scripts']}
             self.skills[name] = dict(data, root=folder.resolve(), actions=actions)
 
     @staticmethod
@@ -56,12 +61,17 @@ class Registry:
         return {'content': content}
 
     def planning_context(self, context, name=None):
+        from primebuddy.core.engine import CleanupUnconfirmed
         result = {}
         for skill in ([name] if name else self.skills):
             provider = getattr(self.load(skill), 'planning_context', None)
             if callable(provider):
                 try:
-                    result[skill] = provider(context)
+                    value = provider(context)
+                    if value is not None:
+                        result[skill] = value
+                except CleanupUnconfirmed:
+                    raise
                 except Exception:
                     result[skill] = {'status': 'unavailable'}
         return result
@@ -72,11 +82,51 @@ class Registry:
             self.modules[name] = SkillRuntime(self.skills[name])
         return self.modules[name]
 
+    def close(self):
+        errors = []
+        for runtime in self.modules.values():
+            try:
+                close = getattr(runtime, 'close', None)
+                if callable(close):
+                    close()
+            except Exception as error:
+                errors.append(type(error).__name__)
+        if errors:
+            raise SetupError('技能退出清理未完成：' + '、'.join(errors))
+
+    def check_resources(self, context, resources):
+        from primebuddy.core.engine import CleanupUnconfirmed
+        from primebuddy.skills.runtime import _runtime
+        import json
+        normalize = lambda resource: 'speaker' if resource.startswith('speaker.') else resource
+        requested = {normalize(resource) for resource in resources}
+        for marker in _runtime(context).glob('*/cleanup-unconfirmed.json'):
+            try:
+                blocked = json.loads(marker.read_text())['resources']
+                if not isinstance(blocked, list) or any(not isinstance(item, str) for item in blocked):
+                    raise ValueError()
+            except (OSError, ValueError, KeyError, TypeError):
+                raise CleanupUnconfirmed('资源隔离记录不可读，未开始新任务。') from None
+            if requested.intersection(normalize(resource) for resource in blocked):
+                raise CleanupUnconfirmed('所需资源尚未确认释放。')
+
+    def prepare_voice(self, context):
+        # 在任何启动播报前发现上次强杀遗留的设备记录；这里只读查询，不重放操作。
+        for name, skill in self.skills.items():
+            resources = {resource for action in skill['actions'].values() for resource in action['resources']}
+            if (skill.get('adapter', {}).get('status') and
+                    any(resource == 'speaker' or resource.startswith('speaker.') for resource in resources)):
+                self.load(name)._verify(context)
+        self.check_resources(context, {'speaker'})
+
     def validate_args(self, skill, action, args):
         fields = self.skills[skill]['actions'][action]['parameters']
-        if not isinstance(args, dict) or set(args) != set(fields):
+        if (not isinstance(args, dict) or set(args) - set(fields)
+                or any(name not in args and 'default' not in rule for name, rule in fields.items())):
             raise ValueError('技能参数缺失或包含未知字段')
         for name, rule in fields.items():
+            if name not in args:
+                args[name] = deepcopy(rule['default'])
             value = args[name]
             expected = {'string': str, 'boolean': bool, 'integer': int, 'array': list}[rule['type']]
             if type(value) is not expected:

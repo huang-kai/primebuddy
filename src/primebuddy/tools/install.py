@@ -86,7 +86,7 @@ def prepare_logs(directory):
 def stage_application(source, stage):
     # 只复制框架文件；即使从已安装目录升级，也不复制私有配置和技能数据。
     names = ['main.py', 'README.md', 'requirements.txt', 'src', 'resource', 'scripts',
-             'cfg/config.example.yaml', 'cfg/providers.example.yaml']
+             'cfg/config.example.yaml', 'cfg/providers.example.yaml', 'cfg/skill-adapters.example.yaml']
     if (source / 'LICENSE').exists():
         names.append('LICENSE')
     for name in names:
@@ -140,7 +140,7 @@ def install(home):
     if sys.version_info < (3, 10):
         raise RuntimeError('需要 Python 3.10 或更高版本。')
     if sys.prefix != sys.base_prefix:
-        raise RuntimeError('请退出虚拟环境，使用 T1 系统 python3 运行安装器，以匹配系统 ROS 2。')
+        raise RuntimeError('请退出虚拟环境，使用目标 T1/Q1 的系统 python3 运行安装器，以匹配系统 ROS 2。')
     source = Path(__file__).resolve().parents[3]
     if not (source / 'main.py').is_file():
         raise RuntimeError('缺少框架源码，请完整解压安装包。')
@@ -180,7 +180,8 @@ def install(home):
         if (stage / '_deps').exists():
             names.append('_deps')
         # 命令绑定自己的应用根目录；移动或删除下载目录不会影响运行。
-        content = '#!/bin/sh\nexport PRIMEBUDDY_HOME=' + shlex.quote(str(home)) + '\n'
+        content = '#!/bin/bash\nexport PRIMEBUDDY_HOME=' + shlex.quote(str(home)) + '\n'
+        content += 'source ' + shlex.quote(str(home / 'scripts/robot_env.sh')) + ' || exit $?\n'
         content += 'export PYTHONPATH=' + shlex.quote(str(home / 'src') + os.pathsep + str(home / '_deps')) + '"${PYTHONPATH:+:$PYTHONPATH}"\n'
         content += 'exec ' + shlex.quote(sys.executable) + ' ' + shlex.quote(str(home / 'main.py')) + ' "$@"\n'
         write_atomic(stage / 'bin/primebuddy', content, 0o755)
