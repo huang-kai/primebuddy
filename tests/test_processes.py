@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from primebuddy.skills import processes
 
@@ -102,6 +102,58 @@ time.sleep(60)
         self.assertNotIn(child, processes._process_table())
         record = json.loads(Path(result['record_path']).read_text())
         self.assertIn(child, record['observed_pids'])
+
+    def test_second_snapshot_tracks_same_group_child_only_before_root_is_reaped(self):
+        root, child = 2147483646, 2147483647
+        for seen_before_reap in (True, False):
+            with self.subTest(seen_before_reap=seen_before_reap):
+                pipes = []
+                for _ in range(2):
+                    read_fd, write_fd = os.pipe()
+                    os.close(write_fd)
+                    pipe = os.fdopen(read_fd, 'rb')
+                    self.addCleanup(pipe.close)
+                    pipes.append(pipe)
+                process = Mock(pid=root, returncode=None, stdout=pipes[0], stderr=pipes[1])
+                alive, scans = True, 0
+
+                def group_members(group):
+                    nonlocal scans
+                    self.assertEqual(group, root)
+                    scans += 1
+                    if scans <= 2:
+                        return {root: 'root-start'}
+                    return {child: 'child-start'} if alive else {}
+
+                def process_table():
+                    # 根进程在两次采样之间退出；子进程已由 PID 1 接管，但仍同组。
+                    if alive and (seen_before_reap or process.returncode is not None):
+                        return {child: (1, root, 'child-start')}
+                    return {}
+
+                def poll():
+                    process.returncode = 0
+                    return 0
+
+                def kill_group(group, sig):
+                    nonlocal alive
+                    self.assertEqual((group, sig), (root, signal.SIGINT))
+                    alive = False
+
+                process.poll.side_effect = poll
+                with patch.object(processes.subprocess, 'Popen', return_value=process), \
+                        patch.object(processes, '_group_members', side_effect=group_members), \
+                        patch.object(processes, '_process_table', side_effect=process_table), \
+                        patch.object(processes.os, 'killpg', side_effect=kill_group) as killpg, \
+                        patch.object(processes.os, 'kill') as kill:
+                    result = self.run_command('unused')
+                expected = 'exited' if seen_before_reap else 'cleanup_failed'
+                self.assertEqual((result['status'], result['returncode']), (expected, 0))
+                self.assertEqual(result['cleanup_confirmed'], seen_before_reap)
+                record = json.loads(Path(result['record_path']).read_text())
+                self.assertEqual(child in record['observed_pids'], seen_before_reap)
+                self.assertEqual(killpg.call_count, int(seen_before_reap))
+                kill.assert_not_called()
 
     def test_cancel_one_of_two_tasks_does_not_stop_the_other(self):
         cancelled = threading.Event()

@@ -112,8 +112,12 @@ def run_process(command, *, cwd, env, runtime, cancelled, timeout=600,
         root_running = process.returncode is None
         if not root_running and current and not any(current.get(pid) == identity for pid, identity in known.items()):
             return None
-        known.update(current)
         table = _process_table()
+        if root_running:
+            # 两次采样间根进程可能退出、子进程被重新收养；根尚未回收时
+            # PGID 不会复用，第二次采样中的同组成员仍属于本次执行。
+            current.update({pid: info[2] for pid, info in table.items() if info[1] == process.pid})
+        known.update(current)
         active = {pid: identity for pid, identity in known.items()
                   if pid in table and table[pid][2] == identity}
         # 同组的当前成员，以及先前已观察到的后代，都是发现新后代的根。
