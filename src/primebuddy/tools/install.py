@@ -195,13 +195,20 @@ def install(home):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--home', type=Path, default=Path(os.environ.get('PRIMEBUDDY_HOME', Path.home() / '.primebuddy')),
+    parser.add_argument('--home', type=Path, default=Path(os.environ.get('PRIMEBUDDY_HOME', '~/.primebuddy')),
                         help='统一应用目录，含源码、bin、skills 和配置；默认 ~/.primebuddy')
     parser.add_argument('--no-onboard', action='store_true', help='仅注册命令，稍后执行 primebuddy onboard')
+    parser.add_argument('--shell-env-file', type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
     launcher = None
     try:
+        from primebuddy.tools.board_install import installation_board, install_on_brain
+        board = installation_board()
+        if board is not None:
+            return install_on_brain(board, args.home, args.no_onboard)
         launcher = install(args.home)
+        if args.shell_env_file is not None:
+            args.shell_env_file.write_text(str(launcher.parent / 'env.sh') + '\n')
         print('PrimeBuddy 已安装到：' + str(launcher.parent.parent), flush=True)
         print('命令入口：' + str(launcher), flush=True)
         print('新终端已配置 PATH；当前终端可执行：source ' + shlex.quote(str(launcher.parent / 'env.sh')), flush=True)

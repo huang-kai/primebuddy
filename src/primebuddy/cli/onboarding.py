@@ -1,5 +1,6 @@
 """框架主持向导；随包技能也走普通 RPK / ZIP 安装路径。"""
 import re
+import subprocess
 import zipfile
 
 from primebuddy.config.models import configure_model
@@ -39,10 +40,37 @@ def bundled_skills():
     return bundles
 
 
+def configure_robot(ui):
+    from primebuddy.integrations.primebot.ssh_setup import local_identity, setup_voice_ssh
+    try:
+        identity = local_identity()
+        if identity is None:
+            return
+        from primebuddy.integrations.primebot.device import audio_host
+        from primebuddy.integrations.primebot.native_agent import agent_rpc
+        from primebuddy.config.runtime import private_runtime
+        ui.header('机器人连接', '自动连接原厂语音服务')
+        host = audio_host()
+        if host == 'local':
+            ui.info('使用本板原厂语音服务，无需配置跨板 SSH。')
+        else:
+            setup_voice_ssh(host, identity, ui.info)
+        state = agent_rpc(private_runtime(), 'state')
+        ui.info('✓ 原厂 Agent 状态查询通过：' + str(state['status']))
+        if not str(state['status']).startswith('Running('):
+            ui.info('原厂 Agent 当前未运行；请恢复原厂 Agent 后再启动 Buddy。')
+    except subprocess.SubprocessError:
+        raise SetupError('机器人连接超时或验证失败；已保留安装文件，运行 primebuddy onboard 可重试。') from None
+    except (RuntimeError, OSError, ValueError) as error:
+        raise SetupError('机器人连接尚未完成：' + str(error)
+                         + '。已保留安装文件，运行 primebuddy onboard 可继续配置。') from None
+
+
 def onboard(ui):
     from primebuddy import __version__
-    ui.header('PrimeBuddy ' + __version__, '平台配置 · 模型服务 → 技能选择 → 技能配置')
+    ui.header('PrimeBuddy ' + __version__, '平台配置 · 机器人连接 → 模型服务 → 技能配置')
     ui.info('方向键移动，空格多选，回车确认；Ctrl+C 可取消并保留已完成步骤。')
+    configure_robot(ui)
     ui.header('1 / 2 · 模型服务')
     if ui.confirm('配置模型服务？', default=True):
         configure_model(ui)

@@ -19,7 +19,7 @@ def dispatch_command(argv=None):
         epilog='日常使用：primebuddy start；首次配置：primebuddy onboard；查看子命令参数：<命令> --help')
     parser.add_argument('--version', action='version', version='PrimeBuddy ' + __version__)
     commands = parser.add_subparsers(dest='command', metavar='命令')
-    commands.add_parser('onboard', help='配置模型服务，安装或配置随包技能')
+    commands.add_parser('onboard', help='配置机器人连接、模型服务和随包技能')
     start = commands.add_parser('start', help='启动平台，自动识别 T1/Q1 语音入口',
         description='启动 T1/Q1 平台会话并执行已启用技能。接管原厂 Agent 为 only_voice 并重启，Ctrl+C 退出时恢复原模式。')
     start.add_argument('--sdk-bridge', choices=('namespaced', 'native', 'off'), default='namespaced',

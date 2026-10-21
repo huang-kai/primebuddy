@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 用 source ./scripts/install.sh 安装，让当前终端立即获得 primebuddy 命令。
 _primebuddy_install() {
-  local root script target="${PRIMEBUDDY_HOME:-$HOME/.primebuddy}" result=0
+  local root script environment response result=0
   local -a arguments=("$@")
   if [ -n "${BASH_VERSION:-}" ]; then
     script="${BASH_SOURCE[0]}"
@@ -9,19 +9,14 @@ _primebuddy_install() {
     script="${(%):-%x}"
   fi
   root="$(cd "$(dirname "$script")/.." && pwd)" || return
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --home) shift; target="${1:-}" ;;
-      --home=*) target="${1#--home=}" ;;
-    esac
-    [ "$#" -eq 0 ] || shift
-  done
-  case "$target" in '~/'*) target="$HOME/${target#\~/}" ;; esac
-  "${ASSISTANT_PYTHON:-python3}" "$root/main.py" install "${arguments[@]}" || result=$?
-  if [ -f "$target/bin/env.sh" ]; then
-    . "$target/bin/env.sh"
+  response="$(mktemp)" || return
+  "${ASSISTANT_PYTHON:-python3}" "$root/main.py" install "${arguments[@]}" --shell-env-file "$response" || result=$?
+  # 远程安装不会返回本板入口，避免加载运控板上遗留的旧版本。
+  if IFS= read -r environment < "$response" && [ -f "$environment" ]; then
+    . "$environment"
     hash -r
   fi
+  rm -f "$response"
   unset -f _primebuddy_install
   return "$result"
 }

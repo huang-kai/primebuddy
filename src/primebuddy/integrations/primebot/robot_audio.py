@@ -42,9 +42,12 @@ def successful(response):
 
 
 def ssh_options(runtime):
-    return ['-o', 'BatchMode=yes', '-o', f'ConnectTimeout={SSH["connect_timeout"]}', '-o', f'ServerAliveInterval={SSH["alive_interval"]}',
-            '-o', f'ServerAliveCountMax={SSH["alive_count"]}', '-o', f'ControlPath={runtime}/soc0.sock',
-            '-o', f'UserKnownHostsFile={runtime}/known_hosts']
+    options = ['-o', 'BatchMode=yes', '-o', f'ConnectTimeout={SSH["connect_timeout"]}', '-o', f'ServerAliveInterval={SSH["alive_interval"]}',
+               '-o', f'ServerAliveCountMax={SSH["alive_count"]}', '-o', f'ControlPath={runtime}/soc0.sock']
+    # 旧安装保留自己的主机记录；新向导使用标准 SSH 配置，供独立技能共用。
+    if (runtime / 'known_hosts').exists():
+        options += ['-o', f'UserKnownHostsFile={runtime}/known_hosts']
+    return options
 
 
 def require_robot():
@@ -88,13 +91,11 @@ def connect_soc0(runtime):
                 else:
                     raise AudioError('跨板 SSH 控制连接仍被占用，但复用检查失败，未删除。')
         try:
-            subprocess.run(['ssh', '-o', f'ConnectTimeout={SSH["connect_timeout"]}', '-o', f'ServerAliveInterval={SSH["alive_interval"]}',
-                            '-o', f'ServerAliveCountMax={SSH["alive_count"]}', '-o', f'ControlPath={path}',
-                            '-o', f'UserKnownHostsFile={runtime}/known_hosts',
+            subprocess.run(['ssh', *ssh_options(runtime), '-o', 'StrictHostKeyChecking=yes',
                             '-o', 'ControlMaster=yes', '-o', f'ControlPersist={SSH["persist_seconds"]}', '-Nf', audio_host()],
                            check=True, timeout=60)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-            raise AudioError('跨板 SSH 登录失败或超时，请检查连接与密码后重试。') from None
+            raise AudioError('跨板 SSH 登录失败或超时，请运行 primebuddy onboard 配置运控板连接后重试。') from None
         # SSH 返回 0 也可能已禁用复用，必须确认实际控制连接可用。
         if not soc0_connected(runtime):
             raise AudioError('跨板 SSH 复用连接未建立，请检查 SSH 提示后重试。')

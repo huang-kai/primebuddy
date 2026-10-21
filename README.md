@@ -59,21 +59,20 @@ flowchart LR
 
 ### 准备环境
 
-机器人运行环境需要系统 Python 3.10+、ROS 2 和目标设备已安装的原厂消息包。框架读取 `/robot/data/info/series` 识别 T1/Q1，不限制应用部署在 SoC 0 或 SoC 1；未知型号明确拒绝启动，不覆盖原厂消息包。
+机器人运行环境需要系统 Python 3.10+、ROS 2 和目标设备已安装的原厂消息包。框架读取 `/robot/data/info/series` 识别 T1/Q1；SoC 0 统一称为运控板，SoC 1 称为大脑板。未知型号明确拒绝启动，不覆盖原厂消息包。
 
-语音服务与应用同机时直接调用，不需要 SSH。默认按当前已确认拓扑使用 SoC 0 的语音服务：部署于 SoC 0 采用本地路径，部署于 SoC 1 使用 `run@10.1.1.100`；可用 `PRIMEBOT_AUDIO_HOST=local` 或 `PRIMEBOT_AUDIO_HOST=user@host` 显式指定服务主机。远程文件准备和 Agent 管理需要预先配置可用的 SSH 登录；不会假设跨板共享文件。SDK 提供的 SSH/TCP 方式不因传输类型而被排除，但不能把直接出声当成已具备会话续听。
+语音服务与应用同机时直接调用，不需要 SSH。默认使用运控板的语音服务：部署于运控板采用本地路径，部署于大脑板使用 `run@10.1.1.100`；可用 `PRIMEBOT_AUDIO_HOST=local` 或 `PRIMEBOT_AUDIO_HOST=user@host` 显式指定服务主机。向导自动检查并配置跨板 SSH，供 Agent 管理和音频文件传输使用；不会假设跨板共享文件。
 
 千问模型调用需要 API Host、API Key 和网络连接。安装向导会引导你填写这些信息，再选择语音识别、对话和语音合成模型。
 
 ### 安装框架
 
-从源码安装时，在业务板执行：
+从源码安装时，在机器人当前登录的板上执行：
 
 ```bash
 git clone https://github.com/huang-kai/primebuddy.git primebuddy
 cd primebuddy
 
-source ./scripts/robot_env.sh
 source ./scripts/install.sh
 ```
 
@@ -83,17 +82,28 @@ source ./scripts/install.sh
 unzip primebuddy-1.0.0.rpk -d ./primebuddy-release
 cd primebuddy-release/primebuddy
 
-source ./scripts/robot_env.sh
 source ./scripts/install.sh
 ```
 
-安装脚本会准备 Python 依赖，将程序安装到 `~/.primebuddy`，并让当前终端可以使用 `primebuddy` 命令。首次准备默认日志目录时，可能需要管理员权限。安装完成后，原来的下载或解压目录可以删除。
+安装器自动选择位置，T1 和 Q1 使用相同规则，无需选择板型：
+
+- 当前在大脑板：直接安装。
+- 当前在运控板：探测固定地址 `10.1.1.101:22`，最多尝试三次，每次连接超时两秒。可达时自动连接大脑板、核对身份并传输安装包，后续安装和向导均在大脑板完成。
+- 始终未探测到大脑板：在运控板本地安装。单板 Q1 使用这一流程，不配置跨板 SSH。
+
+这里以固定内网地址作为安装约定；大脑板关闭或 SSH 不可达时也会走本板流程。端口可达后的密码错误、身份不符或传输失败会停止安装，不会退回运控板继续。已有安装更新时保留目标板配置、技能和数据；跨板只传输安装包，不搬迁运控板上的旧账号或私有配置。
+
+程序安装到目标板的 `~/.primebuddy`，自动准备 Python 依赖和命令入口。首次准备默认日志目录时，可能需要管理员权限。跨板交互安装完成后，终端留在大脑板，可直接运行 `primebuddy start`；输入 `exit` 返回运控板，下次可从运控板执行 `ssh -t run@10.1.1.101` 再进入大脑板。原来的下载或解压目录可以删除。
 
 随后向导会依次完成：
 
-1. 选择模型服务商，填写 API Host 和 API Key。
-2. 选择 ASR、LLM、TTS 模型，并按提示验证连接；验证会产生少量 API 调用。
+1. 自动检查原厂语音连接。本板服务直接查询；跨板连接优先复用已有免密认证，必要时由 SSH 提示输入运控板登录密码，程序不保存密码。
+2. 选择模型服务商，填写 API Host 和 API Key，选择 ASR、LLM、TTS 模型并验证连接；验证会产生少量 API 调用。
 3. 如果框架包附带 skill，选择要安装的技能，完成它们各自的配置。
+
+需要新授权时，向导在大脑板的 `~/.ssh/primebuddy/` 生成专用密钥，只向运控板追加公钥，并在本机 `~/.ssh/config` 中加入对应地址的密钥配置，供框架和独立技能共用。若原厂镜像将当前用户的 `~/.ssh` 设为 root 所有且不可写，安装器会请求管理员权限，只调整该目录本身的所有者和权限，保留里面已有文件。私钥不传输，不覆盖已有用户密钥，更新时保留。首次连接记录主机公钥，主机公钥改变时 SSH 会拒绝连接。已有认证通过时不会生成新密钥。
+
+从运控板开始双板安装时，可能分别提示“大脑板登录”和“运控板语音连接”的密码。向导通过一次不复用临时会话的连接验证免密认证，并只读查询原厂 Agent 状态；安装不启停 Agent、不切换语音模式。中断后在目标板运行 `primebuddy onboard` 可继续；连接未完成时不会提前进入模型和技能配置。
 
 方向键切换选项，空格多选，回车确认。框架没有附带技能时，稍后按 [部署和管理 skill](#部署和管理-skill) 单独安装即可。
 
@@ -126,7 +136,7 @@ ASR、对话模型、TTS 或点歌取流发生明确的连接失败、DNS 故障
 source ~/.primebuddy/bin/env.sh
 ```
 
-安装后的 `primebuddy` 入口会按 T1/Q1 自动加载对应的原厂 ROS 环境，新终端无需再次手动加载。
+安装后的 `primebuddy` 入口会按 T1/Q1 自动加载对应的原厂 ROS 环境，新终端无需再次手动加载。双板用户应在大脑板运行命令；运控板上的安装入口不会注册第二份 Buddy。
 
 ### 更新框架
 
@@ -138,7 +148,7 @@ source ~/.primebuddy/bin/env.sh
 | --- | --- |
 | `primebuddy --help` | 查看帮助 |
 | `primebuddy --version` | 查看版本 |
-| `primebuddy onboard` | 重新进入模型和技能配置向导 |
+| `primebuddy onboard` | 检查机器人连接，继续模型和技能配置 |
 | `primebuddy start` | 启动机器人语音会话 |
 | `primebuddy skill list` | 查看技能及其状态 |
 | `primebuddy skill catalog` | 查看大模型当前可以使用的技能 |
