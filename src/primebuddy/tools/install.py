@@ -85,7 +85,7 @@ def prepare_logs(directory):
 
 def stage_application(source, stage):
     # 只复制框架文件；即使从已安装目录升级，也不复制私有配置和技能数据。
-    names = ['main.py', 'README.md', 'requirements.txt', 'src', 'resource', 'scripts',
+    names = ['main.py', 'README.md', 'CHANGELOG.md', 'release.json', 'requirements.txt', 'src', 'resource', 'scripts',
              'cfg/config.example.yaml', 'cfg/providers.example.yaml', 'cfg/skill-adapters.example.yaml']
     if (source / 'LICENSE').exists():
         names.append('LICENSE')
@@ -136,6 +136,27 @@ def replace_application(stage, home, names):
         raise
 
 
+def stage_launcher(stage, home):
+    # 恢复入口不导入应用源码，也不依赖机器人 ROS 环境。
+    quoted_home = shlex.quote(str(home))
+    python = shlex.quote(sys.executable)
+    content = '#!/bin/bash\nexport PRIMEBUDDY_HOME=' + quoted_home + '\n'
+    content += ('if [ -f "$PRIMEBUDDY_HOME/.update/transaction.json" ]; then\n'
+                '  if [ "$#" -eq 2 ] && [ "$1" = update ] && [ "$2" = --recover ]; then\n'
+                '    exec ' + python + ' "$PRIMEBUDDY_HOME/.update/runner.py" --recover "$PRIMEBUDDY_HOME"\n'
+                '  fi\n'
+                '  echo "存在未完成升级，请先运行 primebuddy update --recover。" >&2\n'
+                '  exit 1\nfi\n')
+    content += 'source ' + shlex.quote(str(home / 'scripts/robot_env.sh')) + ' || exit $?\n'
+    content += 'export PYTHONPATH=' + shlex.quote(str(home / 'src') + os.pathsep + str(home / '_deps')) + '"${PYTHONPATH:+:$PYTHONPATH}"\n'
+    content += 'exec ' + python + ' ' + shlex.quote(str(home / 'main.py')) + ' "$@"\n'
+    write_atomic(stage / 'bin/primebuddy', content, 0o755)
+    quoted = shlex.quote(str(home / 'bin'))
+    write_atomic(stage / 'bin/env.sh', f'# PrimeBuddy 命令路径，可重复加载\ncase ":$PATH:" in\n'
+                 f'  *:{quoted}:*) ;;\n  *) export PATH={quoted}:"$PATH" ;;\nesac\n')
+    return ['bin/primebuddy', 'bin/env.sh']
+
+
 def install(home):
     if sys.version_info < (3, 10):
         raise RuntimeError('需要 Python 3.10 或更高版本。')
@@ -145,6 +166,7 @@ def install(home):
     if not (source / 'main.py').is_file():
         raise RuntimeError('缺少框架源码，请完整解压安装包。')
     home = home.expanduser().resolve()
+    existing = (home / 'main.py').is_file()
     if ':' in str(home):
         raise RuntimeError('命令目录不能包含 PATH 分隔符“:”。')
     if any(home.is_relative_to(source / name) for name in ('src', 'resource', 'scripts', 'cfg')):
@@ -158,10 +180,17 @@ def install(home):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError('另一个安装或配置正在进行，请结束后重试。') from None
+        # 此时系统可能还没有 PyYAML，事务检查不能提前导入配置模块。
+        if (home / '.update/transaction.json').exists():
+            raise RuntimeError('存在未完成升级，请先运行 primebuddy update --recover。')
         temp = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix='.install-', dir=home)))
         stage = temp / 'new'
         names = stage_application(source, stage)
         prepare_dependencies(stage)
+        from primebuddy.tools.update import require_idle_runtime, skill_updates, prepare_skills, commit_update
+        from primebuddy.config.compatibility import load_release
+        manifest = load_release(source / 'release.json')
+        updates = skill_updates(home, manifest)
         from primebuddy.config.logging_setup import log_directory
         from primebuddy.config.runtime import runtime_directory
         runtime = runtime_directory()
@@ -171,6 +200,7 @@ def install(home):
             fcntl.flock(audio_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError('PrimeBuddy 正在运行，请先退出会话再升级。') from None
+        require_idle_runtime(runtime)
         prepare_logs(log_directory().resolve())
         for name in ('config', 'providers'):
             relative = 'cfg/' + name + '.yaml'
@@ -179,17 +209,13 @@ def install(home):
                 names.append(relative)
         if (stage / '_deps').exists():
             names.append('_deps')
-        # 命令绑定自己的应用根目录；移动或删除下载目录不会影响运行。
-        content = '#!/bin/bash\nexport PRIMEBUDDY_HOME=' + shlex.quote(str(home)) + '\n'
-        content += 'source ' + shlex.quote(str(home / 'scripts/robot_env.sh')) + ' || exit $?\n'
-        content += 'export PYTHONPATH=' + shlex.quote(str(home / 'src') + os.pathsep + str(home / '_deps')) + '"${PYTHONPATH:+:$PYTHONPATH}"\n'
-        content += 'exec ' + shlex.quote(sys.executable) + ' ' + shlex.quote(str(home / 'main.py')) + ' "$@"\n'
-        write_atomic(stage / 'bin/primebuddy', content, 0o755)
-        quoted = shlex.quote(str(home / 'bin'))
-        write_atomic(stage / 'bin/env.sh', f'# PrimeBuddy 命令路径，可重复加载\ncase ":$PATH:" in\n'
-                     f'  *:{quoted}:*) ;;\n  *) export PATH={quoted}:"$PATH" ;;\nesac\n')
-        names.extend(('bin/primebuddy', 'bin/env.sh'))
-        replace_application(stage, home, names)
+        names.extend(stage_launcher(stage, home))
+        names.extend(prepare_skills(source, stage, manifest, updates))
+        if existing or updates:
+            configure_shell(home / 'bin/env.sh')
+            commit_update(home, stage, names, lock_fds=(lock.fileno(), audio_lock.fileno()))
+        else:
+            replace_application(stage, home, names)
     return home / 'bin/primebuddy'
 
 
@@ -203,7 +229,8 @@ def main():
     launcher = None
     try:
         from primebuddy.tools.board_install import installation_board, install_on_brain
-        board = installation_board()
+        existing = (args.home.expanduser() / 'main.py').is_file()
+        board = None if existing else installation_board()
         if board is not None:
             return install_on_brain(board, args.home, args.no_onboard)
         launcher = install(args.home)
@@ -212,7 +239,7 @@ def main():
         print('PrimeBuddy 已安装到：' + str(launcher.parent.parent), flush=True)
         print('命令入口：' + str(launcher), flush=True)
         print('新终端已配置 PATH；当前终端可执行：source ' + shlex.quote(str(launcher.parent / 'env.sh')), flush=True)
-        if not args.no_onboard:
+        if not args.no_onboard and not existing:
             return subprocess.call([str(launcher), 'onboard'])
         return 0
     except (KeyboardInterrupt, EOFError):

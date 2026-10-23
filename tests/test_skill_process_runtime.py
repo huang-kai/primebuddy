@@ -3,6 +3,8 @@ import json
 import os
 from pathlib import Path
 import signal
+import subprocess
+import sys
 from types import SimpleNamespace
 import tempfile
 import time
@@ -12,6 +14,7 @@ from unittest.mock import patch
 from primebuddy.core.engine import CleanupUnconfirmed, Context, TurnInterrupted, execute, validate_plan
 from primebuddy.integrations.primebot.native_voice import NativeVoiceInput
 from primebuddy.skills.processes import run_process
+from primebuddy.skills import processes
 from primebuddy.skills.registry import Registry
 
 
@@ -20,6 +23,8 @@ import json
 import os
 from pathlib import Path
 import signal
+import subprocess
+import sys
 import time
 
 if __name__ != '__main__':
@@ -44,6 +49,13 @@ elif args.operation == 'play':
     with (args.runtime / 'executed').open('a') as log:
         log.write(args.mode + '\\n')
     busy.touch()
+    if args.mode == 'linger':
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                                 start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        (args.runtime / 'child.pid').write_text(str(child.pid))
+        busy.unlink()
+        time.sleep(.2)
+        raise SystemExit(0)
     if args.mode == 'stuck':
         stuck.touch()
         os._exit(7)
@@ -283,6 +295,107 @@ class SkillProcessRuntimeTests(unittest.TestCase):
             execute(self.plan(self.task(mode='abnormal')), self.registry, self.context, announce=announcements.append)
         self.assertEqual(len(announcements), 1)
         self.assertTrue((self.data / 'cleanup-unconfirmed.json').exists())
+
+    def test_uncertain_process_blocks_next_turn_and_restart_until_identity_disappears(self):
+        real_popen, real_members = subprocess.Popen, processes._group_members
+        root_exited = False
+        def supervise(command, **kwargs):
+            if 'play' not in command:
+                return run_process(command, **kwargs)
+            def popen(*args, **options):
+                process = real_popen(*args, **options)
+                if args[0] == command:
+                    original_poll = process.poll
+                    def poll():
+                        nonlocal root_exited
+                        code = original_poll()
+                        root_exited = code is not None
+                        return code
+                    process.poll = poll
+                return process
+            def members(group):
+                if root_exited:
+                    raise OSError('process inspection failed during cleanup')
+                return real_members(group)
+            with patch.object(processes.subprocess, 'Popen', side_effect=popen), \
+                    patch.object(processes, '_group_members', side_effect=members):
+                return run_process(command, **kwargs)
+        child, child_cleaned = None, False
+        try:
+            with patch('primebuddy.skills.runtime.run_process', side_effect=supervise), self.assertRaises(CleanupUnconfirmed):
+                execute(self.plan(self.task(mode='linger')), self.registry, self.context, announce=lambda _: None)
+            child = int((self.data / 'child.pid').read_text())
+            self.assertIn(child, processes._process_table())
+            marker = self.data / 'cleanup-unconfirmed.json'
+            self.assertTrue(marker.exists())
+            restarted = Registry(self.skills)
+            self.addCleanup(restarted.close)
+            for registry in (self.registry, restarted):
+                with self.assertRaises(CleanupUnconfirmed):
+                    execute(self.plan(self.task('next')), registry,
+                            Context(runtime=self.context.runtime, simulate=False), announce=lambda _: None)
+                with self.assertRaises(CleanupUnconfirmed):
+                    registry.prepare_voice(Context(runtime=self.context.runtime, simulate=False))
+                self.assertTrue(marker.exists())
+            self.assertEqual(self.executed(), ['linger'])
+            os.kill(child, signal.SIGKILL)
+            deadline = time.monotonic() + 3
+            while child in processes._process_table() and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertNotIn(child, processes._process_table())
+            child_cleaned = True
+            child = None
+            result = execute(self.plan(self.task('next')), restarted,
+                             Context(runtime=self.context.runtime, simulate=False), announce=lambda _: None)
+            self.assertEqual(result['next']['status'], 'success')
+            self.assertFalse(marker.exists())
+        finally:
+            if not child_cleaned and child is None and (self.data / 'child.pid').exists():
+                child = int((self.data / 'child.pid').read_text())
+            if child is not None:
+                try:
+                    os.kill(child, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_legacy_or_invalid_process_isolation_cannot_be_cleared_by_idle_device(self):
+        self.data.mkdir(parents=True)
+        marker = self.data / 'cleanup-unconfirmed.json'
+        for extra in ({}, {'process_executions': None}, {'process_executions': [None]}):
+            with self.subTest(extra=extra):
+                marker.write_text(json.dumps(dict(resources=['speaker.music'], **extra)))
+                with self.assertRaises(CleanupUnconfirmed):
+                    self.registry.prepare_voice(self.context)
+                self.assertTrue(marker.exists())
+
+    def test_restart_checks_unconfirmed_process_ledger_even_without_skill_marker(self):
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        try:
+            identity = processes._process_table()[child.pid][2]
+            directory = self.context.runtime / 'processes'
+            directory.mkdir(parents=True)
+            execution = 'a' * 32
+            path = directory / (execution + '.json')
+            record = dict(execution_id=execution, cleanup_confirmed=False, pid=child.pid,
+                          root_start_identity=identity, observed_processes={str(child.pid): identity})
+            restarted = Registry(self.skills)
+            self.addCleanup(restarted.close)
+            for state in ('running', 'cleanup_failed'):
+                with self.subTest(state=state):
+                    path.write_text(json.dumps(dict(record, state=state)))
+                    self.assertFalse((self.data / 'cleanup-unconfirmed.json').exists())
+                    with self.assertRaises(CleanupUnconfirmed):
+                        restarted.prepare_voice(self.context)
+            child.terminate()
+            child.wait(timeout=3)
+            restarted.prepare_voice(self.context)
+            # 历史已完成账本没有新增身份字段，也不应阻止正常启动。
+            path.write_text(json.dumps(dict(execution_id=execution, state='exited', cleanup_confirmed=True)))
+            restarted.prepare_voice(self.context)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=3)
 
     def test_context_query_cannot_hide_uncertain_cleanup(self):
         with patch.object(self.registry.load('media-fixture'), 'planning_context', side_effect=CleanupUnconfirmed()):

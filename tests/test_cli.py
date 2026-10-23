@@ -18,6 +18,17 @@ import time
 
 
 class CliTests(unittest.TestCase):
+    def test_update_is_dispatched_without_loading_skills_or_voice(self):
+        for arguments, expected in ((['update'], dict(check=False, version=None, recover=False)),
+                (['update', '--check', '--version', '1.1.0'], dict(check=True, version='1.1.0', recover=False)),
+                (['update', '--recover'], dict(check=False, version=None, recover=True))):
+            with self.subTest(arguments=arguments), patch('primebuddy.tools.update.run_update') as update, \
+                    patch('primebuddy.cli.commands.Registry') as registry, patch('primebuddy.voice.session.serve') as serve:
+                run(arguments)
+            update.assert_called_once_with(**expected)
+            registry.assert_not_called()
+            serve.assert_not_called()
+
     def test_empty_command_explains_entrypoints_without_loading_skills(self):
         output = io.StringIO()
         with patch('primebuddy.cli.commands.Registry') as registry, contextlib.redirect_stdout(output):

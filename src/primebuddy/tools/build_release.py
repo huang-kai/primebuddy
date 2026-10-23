@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """生成项目名-版本号.rpk；内容为 ZIP，不收集私有数据和开发文档。"""
 import argparse
+import hashlib
+import json
 from pathlib import Path
+import re
 import sys
 import tempfile
 import zipfile
@@ -11,6 +14,7 @@ sys.path.insert(0, str(ROOT / '_deps'))
 sys.path.insert(0, str(ROOT / 'src'))
 from primebuddy.skills.manager import load_skill_metadata
 from primebuddy import __version__
+from primebuddy.config.compatibility import load_release, release_url
 
 
 def add_tree(archive, source, prefix, exclude=()):
@@ -35,12 +39,14 @@ def skill_zip(source, output):
     return data['name']
 
 
-def framework_zip(output, bundles):
+def framework_zip(output, bundles, manifest=None):
     with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
         for name in ('main.py', 'README.md', 'requirements.txt'):
             archive.write(ROOT / name, 'primebuddy/' + name)
         if (ROOT / 'LICENSE').is_file():
             archive.write(ROOT / 'LICENSE', 'primebuddy/LICENSE')
+        archive.writestr('primebuddy/release.json', json_text(manifest if manifest is not None else load_release(ROOT / 'release.json')))
+        archive.write(ROOT / 'CHANGELOG.md', 'primebuddy/CHANGELOG.md')
         for name in ('config.example.yaml', 'providers.example.yaml', 'skill-adapters.example.yaml'):
             archive.write(ROOT / 'cfg' / name, 'primebuddy/cfg/' + name)
         for name in ('src', 'resource', 'scripts'):
@@ -50,12 +56,57 @@ def framework_zip(output, bundles):
             archive.write(path, 'primebuddy/resource/bundled/' + path.name)
 
 
-def build_releases(output_dir, skills, framework=True, overwrite=False):
+def json_text(data):
+    return json.dumps(data, ensure_ascii=False, indent=2) + '\n'
+
+
+def artifact(path, version):
+    return {'filename': path.name, 'url': release_url(version, path.name),
+            'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
+def release_notes(manifest):
+    content = (ROOT / 'CHANGELOG.md').read_text(encoding='utf-8')
+    heading = re.search(r'^##[ \t]+\[?' + re.escape(manifest['version']) + r'\]?(?=[ \t]|$)([^\n]*)\n', content, re.M)
+    if heading is None:
+        raise ValueError('CHANGELOG.md 缺少当前版本：' + manifest['version'])
+    section = re.split(r'^##\s+', content[heading.end():], maxsplit=1, flags=re.M)[0].strip()
+    if not section:
+        raise ValueError('CHANGELOG.md 当前版本没有更新说明。')
+    table = ['| Skill | Supported versions | Recommended |', '| --- | --- | --- |']
+    for name, rule in manifest['skills'].items():
+        table.append(f"| `{name}` | `>={rule['min_version']}, <{rule['max_version']}` | `{rule['recommended_version']}` |")
+    compatibility = '### Compatibility\n\n' + '\n'.join(table)
+    pattern = re.compile(r'^###[ \t]+Compatibility[ \t]*\n.*?(?=^###[ \t]+|\Z)', re.M | re.S)
+    existing = pattern.search(section)
+    if existing:
+        section = section[:existing.start()] + compatibility + '\n\n' + pattern.sub('', section[existing.end():])
+    else:
+        section += '\n\n' + compatibility
+    return '# PrimeBuddy ' + manifest['version'] + heading.group(1).rstrip() + '\n\n' + section.rstrip() + '\n'
+
+
+def build_releases(output_dir, skills, framework=True, overwrite=False, release=False):
     metadata = [load_skill_metadata(source) for source in skills]
     if len({data['name'] for data in metadata}) != len(metadata):
         raise ValueError('技能名称重复')
+    manifest = load_release(ROOT / 'release.json') if framework or release else None
+    if manifest is not None and manifest['version'] != __version__:
+        raise ValueError('发行清单与框架代码版本不一致。')
+    notes = None
+    if release:
+        if not framework:
+            raise ValueError('--release 必须与 --framework 一起使用。')
+        if {data['name'] for data in metadata} != set(manifest['skills']):
+            raise ValueError('完整发行须通过 --skill 提供清单中的全部官方技能，且不能附加其他技能。')
+        for data in metadata:
+            if data['version'] != manifest['skills'][data['name']]['recommended_version']:
+                raise ValueError('官方技能版本与发行清单推荐版本不一致：' + data['name'])
+        notes = release_notes(manifest)
     filenames = ([f'primebuddy-{__version__}.rpk'] if framework else [])
     filenames += [data['name'] + '-' + data['version'] + '.rpk' for data in metadata]
+    if release:
+        filenames += ['release.json', 'release-notes.md']
     if len(set(filenames)) != len(filenames):
         raise ValueError('发布包名称重复')
     outputs = [output_dir / name for name in filenames]
@@ -74,12 +125,21 @@ def build_releases(output_dir, skills, framework=True, overwrite=False):
             skill_zip(source, zipped)
             zipped.rename(path)
             bundles.append(path)
+            if release:
+                manifest['skills'][data['name']]['artifact'] = artifact(path, manifest['version'])
         if framework:
+            manifest.pop('framework', None)
             path = stage / f'primebuddy-{__version__}.rpk'
             zipped = path.with_suffix('.zip')
-            framework_zip(zipped, bundles)
+            framework_zip(zipped, bundles, manifest)
             zipped.rename(path)
+        if release:
+            manifest['framework'] = artifact(path, manifest['version'])
+            (stage / 'release.json').write_text(json_text(manifest), encoding='utf-8')
+            (stage / 'release-notes.md').write_text(notes, encoding='utf-8')
         for path in outputs:
+            if path.suffix != '.rpk':
+                continue
             with zipfile.ZipFile(stage / path.name) as archive:
                 if archive.testzip() is not None:
                     raise ValueError('发布包 ZIP 校验失败：' + path.name)
@@ -94,12 +154,14 @@ def main():
     parser.add_argument('--framework', action='store_true', help='打包框架；只有指定 --skill 时才附带技能')
     parser.add_argument('--skill', type=Path, action='append', help='打包指定技能源码目录，可重复；与 --framework 同用时放入框架包')
     parser.add_argument('--overwrite', action='store_true', help='替换输出目录中已有的同版本 RPK')
+    parser.add_argument('--release', action='store_true', help='生成完整发行：要求框架和清单推荐的全部官方技能，并输出清单、校验值和更新说明')
     args = parser.parse_args()
-    if not args.framework and not args.skill:
+    if not args.framework and not args.skill and not args.release:
         parser.print_help()
         return
     try:
-        outputs = build_releases(args.output_dir, args.skill or [], framework=args.framework, overwrite=args.overwrite)
+        outputs = build_releases(args.output_dir, args.skill or [], framework=args.framework,
+                                 overwrite=args.overwrite, release=args.release)
     except (OSError, ValueError) as error:
         parser.exit(1, str(error) + '\n')
     for path in outputs:

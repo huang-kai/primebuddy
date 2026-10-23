@@ -51,6 +51,55 @@ def _save_record(path, record):
         Path(temporary).unlink(missing_ok=True)
 
 
+def process_cleanup_confirmed(runtime, execution_ids=None):
+    """只读核查未完成账本；身份不足、探测失败或旧进程仍存在时拒绝放行。"""
+    directory = Path(runtime) / 'processes'
+    if execution_ids is not None:
+        if (not isinstance(execution_ids, list) or any(not isinstance(value, str)
+                or len(value) != 32 or any(c not in '0123456789abcdef' for c in value)
+                for value in execution_ids)):
+            return False
+        paths = [directory / (value + '.json') for value in execution_ids]
+    else:
+        try:
+            paths = list(directory.glob('*.json'))
+        except OSError:
+            return False
+    table = None
+    try:
+        for path in paths:
+            record = json.loads(path.read_text())
+            if not isinstance(record, dict) or record.get('execution_id') != path.stem:
+                return False
+            if record.get('cleanup_confirmed') is True:
+                continue
+            identities = record.get('observed_processes')
+            # 未写完的账本没有最终后代快照，不能仅凭根进程消失推断完成。
+            if (record.get('state') != 'cleanup_failed' or not isinstance(identities, dict)
+                    or not identities or any(not pid.isdigit() or int(pid) <= 0
+                    or not isinstance(identity, str) or not identity for pid, identity in identities.items())
+                    or not record.get('root_start_identity')
+                    or identities.get(str(record.get('pid'))) != record['root_start_identity']):
+                return False
+            if table is None:
+                table = _process_table()
+            for pid, identity in identities.items():
+                current = table.get(int(pid))
+                if current is not None and current[2] == identity:
+                    return False
+                if current is None and sys.platform.startswith('linux'):
+                    # 全表扫描会跳过不可读 /proc 项；不能把读失败当作进程退出。
+                    try:
+                        fields = Path('/proc', pid, 'stat').read_text().rsplit(')', 1)[1].split()
+                    except FileNotFoundError:
+                        continue
+                    if fields[0] not in ('Z', 'X') and fields[19] == identity:
+                        return False
+        return True
+    except (OSError, ValueError, TypeError, IndexError, subprocess.SubprocessError):
+        return False
+
+
 def run_process(command, *, cwd, env, runtime, cancelled, timeout=600,
                 max_output_bytes=1024 * 1024, task_id='', owner_id='', stop_grace=(3.0, 2.0, 2.0)):
     """运行 argv；等待超时与取消均停止进程组，返回真实退出和清理状态。
@@ -232,6 +281,7 @@ def run_process(command, *, cwd, env, runtime, cancelled, timeout=600,
         else:
             cleanup_confirmed = True
         error.cleanup_confirmed = cleanup_confirmed
+        error.execution_id = execution_id
         raise
     finally:
         selector.close()
@@ -246,11 +296,13 @@ def run_process(command, *, cwd, env, runtime, cancelled, timeout=600,
             reason = 'cleanup_failed'
         record.update(state=reason, returncode=process.returncode if process else None,
                       cleanup_confirmed=cleanup_confirmed, finished_at=time.time(),
-                      output_bytes=output_size, observed_pids=sorted(known))
+                      output_bytes=output_size, observed_pids=sorted(known),
+                      observed_processes={str(pid): identity for pid, identity in known.items()})
         try:
             _save_record(record_path, record)
         except BaseException as error:
             error.cleanup_confirmed = cleanup_confirmed
+            error.execution_id = execution_id
             raise
     return dict(execution_id=execution_id, status=reason, returncode=record['returncode'],
                 stdout=output_paths['stdout'].read_bytes().decode('utf-8', errors='replace'),

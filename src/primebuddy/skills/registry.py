@@ -111,6 +111,12 @@ class Registry:
                 raise CleanupUnconfirmed('所需资源尚未确认释放。')
 
     def prepare_voice(self, context):
+        from primebuddy.core.engine import CleanupUnconfirmed
+        from primebuddy.skills.processes import process_cleanup_confirmed
+        from primebuddy.skills.runtime import _runtime
+        # 监督器被强杀时可能只有进程账本，尚未来得及写技能隔离记录。
+        if not process_cleanup_confirmed(_runtime(context)):
+            raise CleanupUnconfirmed('历史技能进程尚未确认退出，未启动语音会话。')
         # 在任何启动播报前发现上次强杀遗留的设备记录；这里只读查询，不重放操作。
         for name, skill in self.skills.items():
             resources = {resource for action in skill['actions'].values() for resource in action['resources']}

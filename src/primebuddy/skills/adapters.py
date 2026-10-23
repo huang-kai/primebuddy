@@ -11,7 +11,10 @@ def load_adapters():
     return defaults
 
 
-def adapt_metadata(data, root, adapters=None):
+def adapt_metadata(data, root, adapters=None, *, check_compatibility=True):
+    if check_compatibility:
+        from primebuddy.config.compatibility import check_skill
+        check_skill(data)
     adapter = (load_adapters() if adapters is None else adapters).get(data['name'])
     if adapter is None:
         return data

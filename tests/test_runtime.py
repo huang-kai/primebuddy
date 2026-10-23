@@ -38,7 +38,8 @@ class RuntimeTests(unittest.TestCase):
             folder = self.root / 'skills' / name
             (folder / 'cfg').mkdir(parents=True)
             (folder / 'SKILL.md').write_text('---\nname: ' + name + '\ndescription: 调度测试\n---\nfixture')
-            (folder / 'cfg/pkg.yaml').write_text(json.dumps({'primebuddy': {
+            version = '0.4.0' if name == 'diangetai' else '0.3.0'
+            (folder / 'cfg/pkg.yaml').write_text(json.dumps({'version': version, 'primebuddy': {
                 'entrypoint': 'actions.py', 'actions': {action: {'parameters': parameters, 'resources': resources}}}}))
             (folder / 'actions.py').write_text('import time\n'
                 'def preflight(action, args, context):\n'

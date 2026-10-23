@@ -2,7 +2,7 @@
 
 PrimeBuddy 是一个让机器人通过语音调用技能的 Python 框架。你可以对机器人说“放一首歌”或“打开灯”，由框架识别语音、理解请求，交给相应的 skill 执行，再用语音告诉你结果。
 
-框架负责通用的语音和任务流程，skill 负责具体业务。开发新能力时，通常只需添加技能说明和业务脚本，无需修改框架。当前版本为 **1.0.0**，启动时识别启元 T1/Q1，只适配框架自身的原厂语音前端和播报。技能独立使用设备接口，不依赖框架播放器。
+框架负责通用的语音和任务流程，skill 负责具体业务。开发新能力时，通常只需添加技能说明和业务脚本，无需修改框架。当前版本为 **1.1.0**，正式支持启元 T1 和 Q1 型号，启动时自动识别，只适配框架自身的原厂语音前端和播报。技能独立使用设备接口，不依赖框架播放器。版本变化见 [更新记录](CHANGELOG.md)。
 
 当前提供两个独立 skill，源码在 [PrimeSkills](https://github.com/huang-kai/primeskills)：
 
@@ -76,22 +76,22 @@ cd primebuddy
 source ./scripts/install.sh
 ```
 
-如果已经拿到 `primebuddy-1.0.0.rpk`，可以用 ZIP 工具解压，再运行同一个安装脚本：
+如果已经拿到 `primebuddy-1.1.0.rpk`，可以用 ZIP 工具解压，再运行同一个安装脚本：
 
 ```bash
-unzip primebuddy-1.0.0.rpk -d ./primebuddy-release
+unzip primebuddy-1.1.0.rpk -d ./primebuddy-release
 cd primebuddy-release/primebuddy
 
 source ./scripts/install.sh
 ```
 
-安装器自动选择位置，T1 和 Q1 使用相同规则，无需选择板型：
+首次安装时，安装器自动选择位置，T1 和 Q1 使用相同规则，无需选择板型：
 
 - 当前在大脑板：直接安装。
 - 当前在运控板：探测固定地址 `10.1.1.101:22`，最多尝试三次，每次连接超时两秒。可达时自动连接大脑板、核对身份并传输安装包，后续安装和向导均在大脑板完成。
 - 始终未探测到大脑板：在运控板本地安装。单板 Q1 使用这一流程，不配置跨板 SSH。
 
-这里以固定内网地址作为安装约定；大脑板关闭或 SSH 不可达时也会走本板流程。端口可达后的密码错误、身份不符或传输失败会停止安装，不会退回运控板继续。已有安装更新时保留目标板配置、技能和数据；跨板只传输安装包，不搬迁运控板上的旧账号或私有配置。
+这里以固定内网地址作为首次安装约定；大脑板关闭或 SSH 不可达时也会走本板流程。端口可达后的密码错误、身份不符或传输失败会停止安装，不会退回运控板继续。跨板只传输安装包，不搬迁运控板上的旧账号或私有配置。更新已有安装时，请在实际安装 Buddy 的板上操作，流程见 [更新框架与技能](#更新框架与技能)。
 
 程序安装到目标板的 `~/.primebuddy`，自动准备 Python 依赖和命令入口。首次准备默认日志目录时，可能需要管理员权限。跨板交互安装完成后，终端留在大脑板，可直接运行 `primebuddy start`；输入 `exit` 返回运控板，下次可从运控板执行 `ssh -t run@10.1.1.101` 再进入大脑板。原来的下载或解压目录可以删除。
 
@@ -122,7 +122,7 @@ primebuddy start
 
 启动后，先用机器人的原厂唤醒词唤醒，再提出技能请求；空闲超时后需要重新唤醒。当前语音入口主要用于技能调用和必要的澄清。命令在当前终端前台运行，按 **Ctrl+C** 退出。
 
-启动时先检查技能遗留的播放和资源记录，未确认释放就不播放启动提示。启动提示结束后等待原厂开放监听，唤醒识别和唤醒应答由原厂 Agent 负责；框架只识别业务语音并播报业务结果。目前未验证到可明确表示原厂唤醒的通知，自动语音打断暂不可用，框架不根据 ASR 文本、会话状态转换或 VAD 开始帧取消任务。任务仍受运行超时、取消信号和进程清理保护；无法确认设备资源已释放时退出语音会话，不继续播放。歌曲正常结束后仍会打开 30 秒接话窗口，可直接提出下一个请求。
+启动时先检查已启用技能的版本兼容性，以及遗留的进程、播放和资源记录；不兼容或未确认释放时，在接管原厂 Agent 前停止。启动提示结束后等待原厂开放监听，唤醒识别和唤醒应答由原厂 Agent 负责；框架只识别业务语音并播报业务结果。目前未验证到可明确表示原厂唤醒的通知，自动语音打断暂不可用，框架不根据 ASR 文本、会话状态转换或 VAD 开始帧取消任务。任务仍受运行超时、取消信号和进程清理保护；无法确认设备资源已释放时退出语音会话，不继续播放。歌曲正常结束后框架会打开 30 秒接话窗口；Q1 的完整两首歌免唤醒续点仍待真人验收，跨轮“再来一首”尚不能沿用上轮点歌上下文。
 
 原厂处于 SPEAKING 状态时，Buddy 不接收监听音频，并清除跨过该播报的不完整片段；恢复监听后须有新的完整 VAD 语句。空闲收音超时后等待新的原厂监听转换，缓存或重复的 LISTENING 状态不会立即重开窗口。业务提示音真实结束后的接话窗口保持原有行为。
 
@@ -138,9 +138,41 @@ source ~/.primebuddy/bin/env.sh
 
 安装后的 `primebuddy` 入口会按 T1/Q1 自动加载对应的原厂 ROS 环境，新终端无需再次手动加载。双板用户应在大脑板运行命令；运控板上的安装入口不会注册第二份 Buddy。
 
-### 更新框架
+### 更新框架与技能
 
-先按 Ctrl+C 退出正在运行的 PrimeBuddy，再进入新版本的源码或解压目录，重新运行 `source ./scripts/install.sh`。更新会保留实际配置、已安装的技能和登录数据。
+先按 Ctrl+C 退出正在运行的 PrimeBuddy，等待原厂模式恢复，再在实际安装 Buddy 的板上执行：
+
+```bash
+# 只检查最新正式版本和已安装技能的兼容性
+primebuddy update --check
+
+# 更新到 GitHub 最新正式 Release，并按该版本清单更新已安装的官方技能
+primebuddy update
+
+# 指定目标版本
+primebuddy update --version 1.1.0
+```
+
+更新在当前安装板完成，不重新选择板、不启动 Buddy、不切换原厂模式。更新器先检查目标发布清单、现有技能及运行状态，准备全部需要的包和 Python 依赖，验证后统一替换框架与技能代码。配置、登录数据、QQ 设备身份和技能启用状态保持；未安装的技能不会自动安装，技能也不会因更新而自动启用或重新扫码。
+
+每个框架版本的 [release.json](release.json) 声明官方技能的兼容范围和固定推荐版本。技能仍可独立运行；这份表仅约束它们与 Buddy 的配合，不代表必须安装。1.1.0 的配套版本为：
+
+| Skill | 兼容范围 | 推荐版本 |
+| --- | --- | --- |
+| `diangetai` | `>=0.4.0, <0.5.0` | `0.4.0` |
+| `yeelight` | `>=0.3.0, <0.4.0` | `0.3.0` |
+
+更新器读取技能目录中的实际版本，不只依赖安装索引。自定义或外部目录中的技能只检查、提示，不覆盖源码；有冲突时先处理对应技能，再继续升级。手动安装、启用技能和启动框架也使用同一兼容检查。已停用的不兼容技能不阻止启动，重新启用前需要升级。
+
+更新失败时恢复本次更新前的代码和安装记录。若断电或进程中断留下未完成事务，先执行：
+
+```bash
+primebuddy update --recover
+```
+
+此命令不联网，也不启动服务：未完成的更新回退到更新前的版本；已完成提交但尚未清理记录的更新保留新版本，只完成清理。如果命令入口不可用，使用更新开始前显示的独立恢复命令。恢复完成后再重新检查或更新；不要手动删除事务记录来绕过检查。
+
+**从 1.0.0 首次升级：** 旧版没有 `update` 命令。下载、解压新的 RPK，在原安装板进入解压后的 `primebuddy` 目录，运行 `source ./scripts/install.sh`。安装器会联合更新框架和已安装的官方技能，并保留配置、登录和启用状态；之后即可使用 `primebuddy update`。全新安装仍通过 `onboard` 自行选择要安装的技能。
 
 ### 常用命令
 
@@ -148,6 +180,9 @@ source ~/.primebuddy/bin/env.sh
 | --- | --- |
 | `primebuddy --help` | 查看帮助 |
 | `primebuddy --version` | 查看版本 |
+| `primebuddy update --check` | 检查正式发布版本及技能兼容性 |
+| `primebuddy update` | 联合更新框架和已安装的官方技能 |
+| `primebuddy update --recover` | 离线回退未完成更新，或清理已完成的事务 |
 | `primebuddy onboard` | 检查机器人连接，继续模型和技能配置 |
 | `primebuddy start` | 启动机器人语音会话 |
 | `primebuddy skill list` | 查看技能及其状态 |
@@ -164,6 +199,8 @@ source ~/.primebuddy/bin/env.sh
 ~/.primebuddy/
 ├── main.py                  程序入口
 ├── README.md                使用说明
+├── CHANGELOG.md             版本更新记录
+├── release.json             当前框架版本及官方技能兼容清单
 ├── LICENSE                  MIT 开源协议
 ├── requirements.txt         框架 Python 依赖
 ├── bin/                     primebuddy 命令和终端环境脚本
@@ -228,7 +265,7 @@ qianwen:
 把技能的 RPK 上传到机器上，在包所在目录执行：
 
 ```bash
-primebuddy skill install ./diangetai-0.3.0.rpk
+primebuddy skill install ./diangetai-0.4.0.rpk
 ```
 
 也可以安装本地的单个技能源码目录：
@@ -244,7 +281,7 @@ RPK 使用 ZIP 格式，旧 ZIP 包也支持；还可以传入 HTTPS 包下载�
 需要以后再配置时：
 
 ```bash
-primebuddy skill install ./diangetai-0.3.0.rpk --no-configure
+primebuddy skill install ./diangetai-0.4.0.rpk --no-configure
 primebuddy skill configure diangetai
 ```
 
@@ -252,7 +289,7 @@ primebuddy skill configure diangetai
 
 ```bash
 # 更新已有技能
-primebuddy skill install ./diangetai-0.3.0.rpk --replace
+primebuddy skill install ./diangetai-0.4.0.rpk --replace
 
 # 重新配置
 primebuddy skill configure diangetai
@@ -264,7 +301,7 @@ primebuddy skill disable diangetai
 primebuddy skill enable diangetai
 ```
 
-安装、更新、配置或启停后，重新启动语音会话，让框架重新加载技能。
+安装、更新、配置或启停后，重新启动语音会话，让框架重新加载技能。需要一起更新框架与已安装的官方技能时，优先使用 `primebuddy update`；单独安装技能也会检查它与当前框架的兼容性。
 
 ### 删除技能
 
@@ -375,7 +412,7 @@ hello:
 
 点歌台和易来的默认映射见 [skill-adapters.example.yaml](cfg/skill-adapters.example.yaml)。用户配置按技能名称替换默认条目，值设为 `null` 可禁用该适配。`configure` 可映射技能自己的交互式配置命令；`context`、动作的 `preflight`、`confirmation` 可映射已有的只读查询或预览命令。它们都是可选 CLI 用法，不要求技能实现同名 Python 函数。配置与登录只在 Console 进行。
 
-设备程序应自行处理标准终止信号和原厂业务收尾。对需要确认外部设备释放的技能，可以配置 `status` 和 `recover` 命令：前者返回实际状态，后者执行技能自身提供的恢复操作。Buddy 仅在状态查询返回 `status: success`、`resources_released: true` 后解除隔离；查询失败、超时或无法确认均保留私有记录，阻止占用相关资源。普通文本 CLI 不需要使用这组可选 JSON 字段。
+设备程序应自行处理标准终止信号和原厂业务收尾。对需要确认外部设备释放的技能，可以配置 `status` 和 `recover` 命令：前者返回实际状态，后者执行技能自身提供的恢复操作。设备隔离需要状态查询返回 `status: success`、`resources_released: true` 才能解除。进程清理未确认时还须独立核对旧进程的 PID 和启动身份，设备空闲不能代替进程退出证明；查询失败、超时或无法确认均保留私有记录，阻止占用相关资源。普通文本 CLI 不需要使用这组可选 JSON 字段。
 
 旧包的 `entrypoint/actions` 和可选 hooks 继续通过一次性 worker 子进程兼容，业务模块不再导入 Buddy 主进程；它们仍属于旧宿主协议，且同样只暴露已声明动作。新的点歌台和易来已迁移普通 CLI，不采用这条路径。
 
@@ -449,9 +486,21 @@ python3 src/primebuddy/tools/build_release.py --framework \
 
 只有显式指定的技能才会进入框架包。组合打包时，也会输出每个技能的独立 RPK。`--skill` 接受源码目录，已有 RPK 直接安装或发布即可。
 
-包默认输出到框架 `dist/`，名称为 `项目名-版本号.rpk`，例如 `primebuddy-1.0.0.rpk`。内容是 ZIP，打包工具会生成 ZIP 后改为 RPK 后缀，可用于分发或准备启元 SkillHub 发布包。
+包默认输出到框架 `dist/`，名称为 `项目名-版本号.rpk`，例如 `primebuddy-1.1.0.rpk`。内容是 ZIP，打包工具会生成 ZIP 后改为 RPK 后缀，可用于分发或准备启元 SkillHub 发布包。
 
 框架版本来自 `src/primebuddy/__init__.py`，技能版本来自 `cfg/pkg.yaml`；没有该文件时，使用 `SKILL.md` 中的 `metadata.version`，未声明版本时为 `0.0.0`。发布前请更新对应版本。
+
+同时维护仓库根目录的 `release.json` 和 [CHANGELOG.md](CHANGELOG.md)。发布清单使用 schema 版本 1，包含框架 `version`，以及各官方技能的 `min_version`、不含上界的 `max_version` 和固定 `recommended_version`。兼容范围表示本框架支持的版本，推荐版本是本次发布选择的具体包；不要把任意仓库的最新包自动视为兼容。
+
+准备可供 `update` 使用的完整正式发行包时，增加 `--release`，同时提供框架和清单中的两个推荐技能版本：
+
+```bash
+python3 src/primebuddy/tools/build_release.py --release --framework \
+  --skill ../primebuddy-skills/diangetai \
+  --skill ../primebuddy-skills/yeelight
+```
+
+此命令输出三个 RPK，以及带包下载地址与 SHA-256 的 `release.json` 和含发布日期及唯一兼容表的 `release-notes.md`。GitHub Release 应一并上传生成的清单和对应 RPK，发布说明使用生成内容，按 `Features`、`Fixes`、`Compatibility`、`Upgrade notes` 和 `Known issues` 组织；源码中的声明、包内声明和发布说明应保持一致。正式更新只使用发布清单中固定的包，不从开发分支直接拉取代码。仅打包成功不代表已经发布，也不代表实机验收通过。
 
 `--output-dir 目录` 可以指定输出位置。修改源码后需要重打同版本包时增加 `--overwrite`；默认不会覆盖已有同名包。测试文件、开发文档、实际框架配置和运行数据不会进入发布包；技能作者应把私有配置和登录态保存在框架的数据目录中。
 

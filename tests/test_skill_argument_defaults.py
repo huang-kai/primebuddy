@@ -82,7 +82,7 @@ class SkillArgumentDefaultsTests(unittest.TestCase):
             adapters = copy.deepcopy(load_adapters())
             adapters['diangetai']['actions']['play']['parameters']['song'] = {'type': kind, 'default': value}
             with self.subTest(kind=kind), self.assertRaisesRegex(SetupError, '默认值'):
-                adapt_metadata({'name': 'diangetai'}, self.registry.skills['diangetai']['root'], adapters)
+                adapt_metadata({'name': 'diangetai', 'version': '0.4.0'}, self.registry.skills['diangetai']['root'], adapters)
 
 
 if __name__ == '__main__':

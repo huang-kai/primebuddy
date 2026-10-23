@@ -231,6 +231,60 @@ time.sleep(60)
         self.assertIs(record['cleanup_confirmed'], False)
         self.assertEqual(record['state'], 'cleanup_failed')
 
+    def test_cleanup_check_uses_start_identity_without_signalling_reused_pid(self):
+        execution = 'a' * 32
+        directory = self.root / 'processes'
+        directory.mkdir()
+        record = dict(execution_id=execution, state='cleanup_failed', cleanup_confirmed=False,
+                      pid=123, root_start_identity='root-start',
+                      observed_processes={'123': 'root-start', '124': 'child-start'})
+        (directory / (execution + '.json')).write_text(json.dumps(record))
+        with patch.object(processes.os, 'kill') as kill, patch.object(processes.os, 'killpg') as killpg:
+            with patch.object(processes, '_process_table', return_value={124: (1, 124, 'child-start')}):
+                self.assertFalse(processes.process_cleanup_confirmed(self.root, [execution]))
+            with patch.object(processes, '_process_table', return_value={124: (1, 124, 'new-start')}):
+                self.assertTrue(processes.process_cleanup_confirmed(self.root, [execution]))
+                self.assertTrue(processes.process_cleanup_confirmed(self.root))
+            kill.assert_not_called()
+            killpg.assert_not_called()
+
+    def test_cleanup_check_rejects_missing_incomplete_and_legacy_records(self):
+        execution = 'a' * 32
+        directory = self.root / 'processes'
+        directory.mkdir()
+        path = directory / (execution + '.json')
+        self.assertFalse(processes.process_cleanup_confirmed(self.root, [execution]))
+        record = dict(execution_id=execution, state='cleanup_failed', cleanup_confirmed=False,
+                      pid=123, root_start_identity='root-start', observed_pids=[123])
+        for changed in ({}, {'state': 'running', 'observed_processes': {'123': 'root-start'}},
+                        {'observed_processes': {}}, {'observed_processes': {'123': None}},
+                        {'observed_processes': {'123': 'different-start'}}):
+            with self.subTest(changed=changed):
+                path.write_text(json.dumps(dict(record, **changed)))
+                with patch.object(processes, '_process_table', return_value={}):
+                    self.assertFalse(processes.process_cleanup_confirmed(self.root))
+        path.write_text('{broken')
+        self.assertFalse(processes.process_cleanup_confirmed(self.root))
+        for invalid in ('not-a-list', [None], ['../outside']):
+            self.assertFalse(processes.process_cleanup_confirmed(self.root, invalid))
+
+    def test_cleanup_check_does_not_treat_unreadable_linux_identity_as_exit(self):
+        execution = 'a' * 32
+        directory = self.root / 'processes'
+        directory.mkdir()
+        record = dict(execution_id=execution, state='cleanup_failed', cleanup_confirmed=False,
+                      pid=123, root_start_identity='root-start', observed_processes={'123': 'root-start'})
+        (directory / (execution + '.json')).write_text(json.dumps(record))
+        read_text = Path.read_text
+        def read(path, *args, **kwargs):
+            if str(path).startswith('/proc/'):
+                raise PermissionError('process identity unreadable')
+            return read_text(path, *args, **kwargs)
+        with patch.object(processes.sys, 'platform', 'linux'), \
+                patch.object(processes, '_process_table', return_value={}), \
+                patch.object(Path, 'read_text', read):
+            self.assertFalse(processes.process_cleanup_confirmed(self.root))
+
 
 if __name__ == '__main__':
     unittest.main()

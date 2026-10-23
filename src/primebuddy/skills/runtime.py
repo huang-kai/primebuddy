@@ -10,7 +10,7 @@ from primebuddy.config.storage import (SetupError, application_directory, config
     get_data_directory, skill_data, private_dir, write_json)
 from primebuddy.skills.metadata import resolve_skill_file
 from primebuddy.skills.adapters import command_arguments
-from primebuddy.skills.processes import run_process
+from primebuddy.skills.processes import run_process, process_cleanup_confirmed
 
 
 def script_command(root, relative, arguments):
@@ -44,21 +44,29 @@ def _runtime(context):
 
 def _process(skill, command, context, timeout=600, *, cleanup=False, stop_grace=None):
     options = {'stop_grace': stop_grace} if stop_grace is not None else {}
+    execution_id = None
     try:
         result = run_process(command, cwd=skill['root'], env=skill_environment(skill['root'], skill['name']),
                              runtime=_runtime(context), cancelled=threading.Event() if cleanup else context.cancelled,
                              timeout=timeout, owner_id=context.owner_id, task_id=context.task_id, **options)
+        execution_id = result.get('execution_id')
     except Exception as error:
         if getattr(error, 'cleanup_confirmed', False) is True:
             raise
         result = None
+        execution_id = getattr(error, 'execution_id', None)
     if result is None or not result['cleanup_confirmed']:
         from primebuddy.core.engine import CleanupUnconfirmed
         try:
             marker = private_dir(_runtime(context) / skill['name']) / 'cleanup-unconfirmed.json'
+            previous = json.loads(marker.read_text()) if marker.exists() else {'process_executions': []}
+            executions = previous.get('process_executions', [None])
+            if not isinstance(executions, list):
+                executions = [None]
             write_json(marker, {'resources': sorted({resource for action in skill['actions'].values()
-                                                   for resource in action['resources']})})
-        except OSError:
+                                                   for resource in action['resources']}),
+                                'process_executions': executions + [execution_id]})
+        except (OSError, ValueError, AttributeError):
             raise CleanupUnconfirmed('进程清理未确认，且无法保存隔离记录。') from None
         raise CleanupUnconfirmed('技能进程清理未确认。')
     return result
@@ -176,8 +184,10 @@ class SkillRuntime:
     def _isolate(self, context):
         try:
             marker = Path(self._values(context)['runtime']) / 'cleanup-unconfirmed.json'
-            write_json(marker, {'resources': sorted({resource for action in self.skill['actions'].values()
-                                                   for resource in action['resources']})})
+            if not marker.exists():
+                write_json(marker, {'resources': sorted({resource for action in self.skill['actions'].values()
+                                                       for resource in action['resources']}),
+                                    'process_executions': []})
         except OSError:
             from primebuddy.core.engine import CleanupUnconfirmed
             raise CleanupUnconfirmed('设备清理未确认，且无法保存隔离记录。') from None
@@ -185,6 +195,13 @@ class SkillRuntime:
     def _verify(self, context, *, recover=False):
         from primebuddy.core.engine import CleanupUnconfirmed
         marker = Path(self._values(context)['runtime']) / 'cleanup-unconfirmed.json'
+        if marker.exists():
+            try:
+                executions = json.loads(marker.read_text())['process_executions']
+            except (OSError, ValueError, KeyError, TypeError):
+                raise CleanupUnconfirmed('资源隔离记录缺少进程身份，未解除隔离。') from None
+            if not isinstance(executions, list) or not process_cleanup_confirmed(_runtime(context), executions):
+                raise CleanupUnconfirmed('旧技能进程尚未确认退出，未解除隔离。')
         try:
             if recover and self.adapter.get('recover'):
                 try:

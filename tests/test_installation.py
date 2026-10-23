@@ -662,9 +662,9 @@ print('BUNDLE_UPGRADE_OK')
                        'cfg/providers.yaml': 'qianwen:\n  api_key: test-only-key\n',
                        'cfg/skills.yaml': 'hello:\n  path: hello\n  version: 0.1.0\n  ready: true\n  enabled: true\n',
                        'cfg/skills/hello/config.yaml': 'keep: 37\n',
-                       'skills/hello/SKILL.md': '---\nname: hello\ndescription: 测试\n---\n保留技能。\n',
+                       'skills/hello/SKILL.md': '---\nname: hello\ndescription: 测试\nmetadata:\n  version: 0.1.0\n---\n保留技能。\n',
                        'data/hello/credential.json': '{"test": "keep-login"}',
-                       'runtime/agent_mode.json': 'keep-recovery-record',
+                       'runtime/diagnostic.txt': 'keep-runtime-data',
                        'bin/custom-tool': 'keep-user-tool'}
             for name, content in private.items():
                 installer.write_atomic(home / name, content, 0o600)

@@ -20,6 +20,11 @@ def dispatch_command(argv=None):
     parser.add_argument('--version', action='version', version='PrimeBuddy ' + __version__)
     commands = parser.add_subparsers(dest='command', metavar='命令')
     commands.add_parser('onboard', help='配置机器人连接、模型服务和随包技能')
+    update = commands.add_parser('update', help='检查并升级官方框架及已安装技能，保留配置和登录数据')
+    update_mode = update.add_mutually_exclusive_group()
+    update_mode.add_argument('--check', action='store_true', help='只检查版本和兼容性，不更改安装')
+    update_mode.add_argument('--recover', action='store_true', help='恢复未完成升级，不联网')
+    update.add_argument('--version', help='目标正式版本，例如 1.1.0；默认官方最新正式 Release')
     start = commands.add_parser('start', help='启动平台，自动识别 T1/Q1 语音入口',
         description='启动 T1/Q1 平台会话并执行已启用技能。接管原厂 Agent 为 only_voice 并重启，Ctrl+C 退出时恢复原模式。')
     start.add_argument('--sdk-bridge', choices=('namespaced', 'native', 'off'), default='namespaced',
@@ -54,6 +59,14 @@ def dispatch_command(argv=None):
     if args.command is None:
         parser.print_help()
         return
+    if args.command == 'update':
+        if args.recover and args.version:
+            parser.error('--recover 不能与 --version 同用')
+        from primebuddy.tools.update import run_update
+        run_update(check=args.check, version=args.version, recover=args.recover)
+        return
+    from primebuddy.tools.update import require_no_update
+    require_no_update()
     if args.command == 'onboard':
         from primebuddy.cli.onboarding import onboard
         from primebuddy.cli.wizard import Wizard

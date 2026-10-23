@@ -16,6 +16,7 @@ import zipfile
 
 from primebuddy.config.storage import SetupError, get_data_directory, config_path, private_dir, read_config, write_config, skill_name, skill_data, skill_config
 from primebuddy.skills.metadata import load_skill_metadata, resolve_skill_file
+from primebuddy.config.compatibility import check_skill
 
 MAX_PACKAGE = 100 * 1024 * 1024
 
@@ -27,10 +28,8 @@ def installation_lock():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise SetupError('另一个安装或配置正在进行，请结束后重试。') from None
-        try:
-            yield
-        finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+        # 只关闭本进程的描述符，保留独立升级执行器继承的同一把锁。
+        yield lock
 
 
 def load_skill_records():
@@ -212,6 +211,7 @@ def install(source, ui=None, ref=None, replace=False):
             report('正在获取技能文件…')
             root = fetch_skill_package(str(source), Path(temp), ref)
             data = load_skill_metadata(root)
+            check_skill(data)
             name = data['name']
             destination = skills / name
             old = index.get(name)
@@ -280,13 +280,36 @@ def get_skill_package_directory(record):
     return path
 
 
-def discover_skill_records():
+def discover_skill_records(*, read_only=False):
     """安装索引用于版本管理；直接复制的 skill 同样进入目录。"""
     from primebuddy.config.storage import load_app_config, application_directory
+    from primebuddy.skills.adapters import adapt_metadata
+    home = get_data_directory()
+    adapters = None
+    if read_only:
+        index_path = home / 'cfg/skills.yaml'
+        records = read_config(index_path if index_path.exists() else home / 'skills.yaml')
+        app = read_config(application_directory() / 'cfg/config.example.yaml', private=False)
+        app_path = home / 'cfg/config.yaml'
+        for name, value in read_config(app_path if app_path.exists() else home / 'config.yaml').items():
+            if isinstance(app.get(name), dict) and isinstance(value, dict):
+                app[name].update(value)
+            else:
+                app[name] = value
+        adapters = read_config(application_directory() / 'cfg/skill-adapters.example.yaml', private=False)
+        adapter_path = home / 'cfg/skill-adapters.yaml'
+        adapters.update(read_config(adapter_path if adapter_path.exists() else home / 'skill-adapters.yaml'))
+    else:
+        records, app = load_skill_records(), load_app_config()
     index = {name: dict(record, root=get_skill_package_directory(record))
-             for name, record in load_skill_records().items()
+             for name, record in records.items()
              if 'directory' not in record or Path(record['directory']).expanduser().is_dir()}
-    settings = load_app_config().get('skills', {})
+    for name, record in index.items():
+        data = load_skill_metadata(record['root'])
+        if data['name'] != name:
+            raise SetupError('技能安装记录与目录名称不一致：' + name)
+        record['version'] = data['version']
+    settings = app.get('skills', {})
     if not isinstance(settings, dict):
         raise SetupError('skills 配置须为键值对象。')
     directories = settings.get('directories', [])
@@ -300,15 +323,17 @@ def discover_skill_records():
         for folder in sorted(root.iterdir()):
             if folder.name.startswith('.') or not folder.is_dir() or not (folder / 'SKILL.md').is_file():
                 continue
-            from primebuddy.skills.adapters import adapt_metadata
-            data = adapt_metadata(load_skill_metadata(folder), folder)
+            data = adapt_metadata(load_skill_metadata(folder), folder, adapters, check_compatibility=False)
             name = data['name']
             if name in index:
                 if index[name]['root'].resolve() != folder.resolve():
                     raise SetupError('技能名称重复，请移除重复目录：' + name)
                 continue
+            configured_path = (home / 'cfg/skills' / name / 'config.yaml' if read_only
+                               else config_path('config.yaml', skill=name))
             configured = (not (data.get('setup') or data.get('configure'))
-                          or config_path('config.yaml', skill=name).is_file())
+                          or configured_path.is_file()
+                          or (read_only and (home / 'data' / name / 'config.yaml').is_file()))
             index[name] = {'root': folder.resolve(), 'version': data['version'],
                            'ready': configured, 'enabled': True}
     return index
@@ -322,13 +347,15 @@ def configure(name, ui):
         if name not in discovered:
             raise SetupError('技能尚未安装：' + name)
         root = discovered[name]['root']
+        data = load_skill_metadata(root)
+        check_skill(data)
         if name not in index:
             index[name] = {key: value for key, value in discovered[name].items() if key != 'root'}
             index[name]['directory'] = str(root)
         # 配置期间先撤销就绪状态；中断不能保留虚假的成功标记。
-        index[name].update(ready=False, enabled=False)
+        index[name].update(version=data['version'], ready=False, enabled=False)
         write_config(config_path('skills.yaml'), index)
-        result = run_setup(root, load_skill_metadata(root), ui)
+        result = run_setup(root, data, ui)
         if result is not None:
             write_config(config_path('config.yaml', skill=name), result)
             index[name].update(ready=True, enabled=True)
@@ -346,6 +373,10 @@ def set_enabled(name, enabled):
             index[name]['directory'] = str(discovered[name]['root'])
         if name not in index:
             raise SetupError('技能尚未安装：' + name)
+        if enabled:
+            data = load_skill_metadata(discovered[name]['root'])
+            check_skill(data)
+            index[name]['version'] = data['version']
         if enabled and not index[name]['ready']:
             raise SetupError('技能尚未配置完成，请先运行 primebuddy skill configure ' + name)
         index[name]['enabled'] = enabled

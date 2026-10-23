@@ -6,7 +6,7 @@ import zipfile
 from primebuddy.config.models import configure_model
 from primebuddy.config.storage import SetupError, application_directory, parse_config
 from primebuddy.skills.metadata import parse_skill_document
-from primebuddy.skills.manager import install, configure, load_skill_records
+from primebuddy.skills.manager import install, configure, load_skill_records, discover_skill_records
 
 
 def bundled_skills():
@@ -76,6 +76,10 @@ def onboard(ui):
         configure_model(ui)
     ui.header('2 / 2 · 安装与配置技能', '技能自行提供配置步骤，使用相同的交互界面')
     index = load_skill_records()
+    actual = discover_skill_records()
+    for name, record in index.items():
+        if name in actual:
+            record['version'] = actual[name]['version']
     bundles = bundled_skills()
     updates = {name for name in bundles if name in index
                and tuple(map(int, bundles[name]['version'].split('.')))
