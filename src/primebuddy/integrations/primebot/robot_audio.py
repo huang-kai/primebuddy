@@ -24,6 +24,7 @@ from primebuddy.config.storage import SetupError
 logger = logging.getLogger(__name__)
 
 CANCEL = threading.Event()
+FRONTEND_LOCK = Path('/tmp/primebot-voice-frontend.lock')
 from .device import detect_device, audio_host, host_command
 SSH = {'connect_timeout': 8, 'alive_interval': 5, 'alive_count': 2, 'persist_seconds': 1800}
 
@@ -113,23 +114,43 @@ def soc0_connected(runtime):
 
 
 @contextlib.contextmanager
+def frontend_lock():
+    """与独立语音应用共用本机前端锁；锁文件长期保留，避免换 inode 绕过互斥。"""
+    try:
+        descriptor = os.open(FRONTEND_LOCK, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        raise AudioError('原厂语音前端锁不可用或不安全。') from None
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise AudioError('原厂语音前端锁须为当前用户的私有普通文件。')
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise AudioError('另一个语音应用正在使用原厂前端，请先结束该应用。') from None
+        yield
+    finally:
+        os.close(descriptor)
+
+
+@contextlib.contextmanager
 def audio_session(runtime, factory=None):
     CANCEL.clear()
     old_signals = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
     for sig in old_signals:
         signal.signal(sig, lambda *_: CANCEL.set())
-    audio = None
     try:
-        with (runtime / 'audio.lock').open('a') as lock:
+        with frontend_lock(), (runtime / 'audio.lock').open('a') as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise AudioError('已有点歌台任务运行。')
             audio = (factory or RobotAudio)(runtime)
-            yield audio
+            try:
+                yield audio
+            finally:
+                audio.close()
     finally:
-        if audio is not None:
-            audio.close()
         for sig, handler in old_signals.items():
             signal.signal(sig, handler)
 

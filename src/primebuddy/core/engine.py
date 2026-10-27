@@ -34,6 +34,11 @@ class Context:
             raise RuntimeError('任务已取消')
 
 
+def exclusive_interaction(plan, registry):
+    return next((task for task in plan['tasks']
+                 if registry.skills[task['skill']]['actions'][task['action']].get('interaction') == 'exclusive'), None)
+
+
 def validate_plan(plan, registry):
     if not isinstance(plan, dict) or set(plan) != {'reply', 'tasks'}:
         raise ValueError('计划必须包含 reply 和 tasks')
@@ -57,6 +62,8 @@ def validate_plan(plan, registry):
             raise ValueError('未安装的技能或不支持的动作')
         registry.validate_args(task['skill'], task['action'], task['args'])
         nodes[name] = task
+    if len(tasks) > 1 and exclusive_interaction(plan, registry):
+        raise ValueError('独占交互应用必须单独启动，不能与其他任务同批或排队执行。')
     ancestors = {}
 
     def visit(name, visiting):
@@ -145,7 +152,10 @@ def execute(plan, registry, context, announce=print, emit=lambda event: None, ch
                             raise CleanupUnconfirmed('技能或设备清理未确认。')
                         emit({'id': task['id'], 'state': result['status']})
                         del running[future]
-                        deferred_announcements.append(result['message'])
+                        action = registry.skills[task['skill']]['actions'][task['action']]
+                        # 独占应用已完成整局对话和结束播报；失败结果仍由宿主明确提示。
+                        if result['status'] != 'success' or action.get('interaction') != 'exclusive':
+                            deferred_announcements.append(result['message'])
                 if not speaker_busy():
                     for message in deferred_announcements:
                         check()

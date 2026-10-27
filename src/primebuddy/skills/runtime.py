@@ -218,6 +218,9 @@ class SkillRuntime:
 
     def preflight(self, action, args, context):
         from primebuddy.core.engine import CleanupUnconfirmed
+        if (self.skill['actions'][action].get('interaction') == 'exclusive'
+                and not all(self.adapter.get(key) for key in ('status', 'recover'))):
+            raise SetupError('独占交互应用须使用带 status 和 recover 的 CLI 适配。')
         if context.simulate and self.adapter:
             return
         marker = Path(self._values(context)['runtime']) / 'cleanup-unconfirmed.json'

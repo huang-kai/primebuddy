@@ -3,7 +3,7 @@ import logging
 import queue
 import time
 
-from primebuddy.core.engine import execute, CleanupUnconfirmed
+from primebuddy.core.engine import execute, CleanupUnconfirmed, exclusive_interaction
 from primebuddy.core.planner import plan, continue_plan
 from primebuddy.core.grounding import vocabulary, confirmation_for, confirmation_answer
 from primebuddy.voice.speech_cache import SpeechCache, NETWORK_ERROR_PROMPT
@@ -69,10 +69,11 @@ def serve(registry, context, sdk_bridge='namespaced'):
                     path = speech.prepare(text[offset:offset + 90])
                     with measure('提示音传输与播放'):
                         try:
+                            # 媒体执行器负责等待；宿主额外阻塞会延迟积压的开始反馈，误判播放时长。
                             if on_finished is not None and offset + 90 >= len(text):
-                                audio_output.play(path, on_finished=on_finished, checkpoint=robot.spin)
+                                audio_output.play(path, on_finished=on_finished, checkpoint=lambda: robot.spin(seconds=0))
                             else:
-                                audio_output.play(path, checkpoint=robot.spin)
+                                audio_output.play(path, checkpoint=lambda: robot.spin(seconds=0))
                         except AudioError as error:
                             logger.error('AUDIO_ERROR %s', str(error))
                             raise
@@ -105,6 +106,14 @@ def serve(registry, context, sdk_bridge='namespaced'):
                 microphone.check_health()
                 if microphone.error:
                     raise microphone.error
+
+            def release_interaction(task, generation):
+                # 子进程已由 execute 监督完成；独立查询设备状态后才能废弃游戏事件并交还监听。
+                if not context.simulate:
+                    registry.load(task['skill'])._verify(context)
+                resources = registry.skills[task['skill']]['actions'][task['action']]['resources']
+                registry.check_resources(context, resources)
+                return microphone.reset_interaction(generation)
             try:
                 microphone.start()
                 deadline = time.monotonic() + 10
@@ -168,6 +177,11 @@ def serve(registry, context, sdk_bridge='namespaced'):
                             text = transcribe_wav(encode_asr_wav(audio, sample_rate=16000), config,
                                                   vocabulary=vocabulary_words)
                         check_cancel()
+                        if not text.strip():
+                            logger.info('ASR_NO_SPEECH')
+                            # 空识别不进入规划、不发声，也不为噪声重新续满30秒。
+                            microphone.listen(generation, reset_deadline=False)
+                            continue
                         logger.info('ASR %s', text)
                         if bridge:
                             bridge.publish_asr(text)
@@ -202,21 +216,36 @@ def serve(registry, context, sdk_bridge='namespaced'):
                                     logger.info('VOICE_CONFIRMATION_PENDING')
                                     break
                             confirmed = False
-                            with measure('任务执行与反馈'):
-                                results = execute(proposal, registry, context, speak, checkpoint=checkpoint,
-                                                  cleanup_checkpoint=cleanup_checkpoint)
+                            interaction = exclusive_interaction(proposal, registry)
+                            if interaction:
+                                generation = microphone.reset_interaction(generation)
+                            try:
+                                with measure('任务执行与反馈'):
+                                    results = execute(proposal, registry, context, speak, checkpoint=checkpoint,
+                                                      cleanup_checkpoint=cleanup_checkpoint)
+                            except CleanupUnconfirmed:
+                                raise
+                            except BaseException:
+                                if interaction:
+                                    generation = release_interaction(interaction, generation)
+                                raise
+                            if interaction:
+                                generation = release_interaction(interaction, generation)
                             executed = True
                             history.clear()
                             check_cancel()
                             if any(result.get('error_code') == 'network_unavailable' for result in results.values()):
                                 raise ProviderNetworkError('技能网络连接失败')
+                            if interaction:
+                                # 整局已结束，不能让旧启动请求经模型继续安排其他技能。
+                                break
                             with measure('Agent结果回传'):
                                 proposal = continue_plan(proposal, results, registry)
                         if pending_plan is not None:
                             continue
                         if executed:
-                            # 实际业务结果由 execute 播报，避免模型总结改变未核实状态。
-                            ask('还想做什么？', generation)
+                            # 任务结束且资源核验通过后，以一条新提问交还宿主监听。
+                            ask('接下来，你还想让我帮你做些什么呢？', generation)
                         else:
                             history.extend([{'role': 'user', 'content': text},
                                             {'role': 'assistant', 'content': proposal['reply']}])

@@ -1,5 +1,21 @@
 # Buddy 的可选宿主适配；技能本身只提供普通 CLI。
 # ~/.primebuddy/cfg/skill-adapters.yaml 可替换同名条目，null 禁用该适配。
+# 新版 chengyu-chain 在自己的 cfg/pkg.yaml 声明模式和 CLI；此条仅兼容旧名安装。
+chengyu-jielong:
+  configure: [main.py, --config, '{config}', --data-dir, '{data}', --runtime-dir, '{runtime}', configure]
+  context: [main.py, --config, '{config}', --data-dir, '{data}', --runtime-dir, '{runtime}', context]
+  status: [main.py, --config, '{config}', --data-dir, '{data}', --runtime-dir, '{runtime}', status]
+  recover: [main.py, --config, '{config}', --data-dir, '{data}', --runtime-dir, '{runtime}', recover]
+  actions:
+    play:
+      command: [main.py, --config, '{config}', --data-dir, '{data}', --runtime-dir, '{runtime}', play, --hosted]
+      parameters: {}
+      resources: [microphone, speaker, robot.motion, robot.expression]
+      interaction: exclusive
+      timeout_seconds: 86400
+      stop_grace_seconds: [25, 2, 2]
+      preflight: [main.py, --config, '{config}', --data-dir, '{data}', --runtime-dir, '{runtime}', check-play]
+      description: 正在开始成语接龙
 diangetai:
   configure: [main.py, --config, '{config}', --data-dir, '{data}', --runtime-dir, '{runtime}', configure]
   context: [main.py, --config, '{config}', --data-dir, '{data}', --runtime-dir, '{runtime}', context]

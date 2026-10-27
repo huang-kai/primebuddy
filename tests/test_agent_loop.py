@@ -84,6 +84,61 @@ def planning_context(context):
             self.assertEqual(plan('你好', registry), {'reply': '你好。', 'tasks': []})
         self.assertEqual(registry.modules, {})
 
+    def test_unsubmitted_start_promise_is_corrected_after_skill_and_context_reads(self):
+        promise = '正在启动成语接龙游戏，难度为初级，每局需接对5个成语获胜。请听好第一个成语...'
+        histories = []
+        responses = iter([*self.responses()[:2], {'role': 'assistant', 'content': promise},
+                          self.responses()[2]])
+        def chat(history, tools, config):
+            histories.append(copy.deepcopy(history))
+            return next(responses)
+        with patch('primebuddy.core.planner.chat', side_effect=chat):
+            proposal = plan('打开这个应用', self.registry, context=self.context)
+        self.assertEqual(proposal['tasks'], [self.task])
+        self.assertEqual(proposal['reply'], '')
+        self.assertEqual(len(histories), 4)
+        self.assertEqual(histories[-1][-2], {'role': 'assistant', 'content': promise})
+        self.assertEqual(histories[-1][-1]['role'], 'system')
+        self.assertFalse(self.calls.exists())
+        execute(proposal, self.registry, self.context, lambda _: None)
+        self.assertEqual(self.calls.read_text().splitlines(), ['世界'])
+
+    def test_unsubmitted_promises_receive_only_one_correction(self):
+        responses = [*self.responses()[:2], {'role': 'assistant', 'content': '正在播放音乐，请稍等。'},
+                     {'role': 'assistant', 'content': '好的，我马上为你打开应用。'}]
+        with patch('primebuddy.core.planner.chat', side_effect=responses) as chat:
+            with self.assertRaisesRegex(ValueError, '未提交|承诺'):
+                plan('打开应用', self.registry, context=self.context)
+        self.assertEqual(chat.call_count, 4)
+        self.assertFalse(self.calls.exists())
+
+    def test_plain_answers_instructions_and_clarifications_do_not_trigger_correction(self):
+        for reply in ('你好。', '我可以帮你启动应用。', '你想启动哪个应用？',
+                      '我来启动应用，可以吗？', '操作方法是先打开应用，再选择难度。',
+                      '我会先解释这条规则。', '我会继续解释这条规则。', '现在开始为你介绍玩法。'):
+            with self.subTest(reply=reply), patch('primebuddy.core.planner.chat',
+                    return_value={'role': 'assistant', 'content': reply}) as chat:
+                self.assertEqual(plan('请介绍一下', self.registry), {'reply': reply, 'tasks': []})
+                self.assertEqual(chat.call_count, 1)
+
+    def test_action_progress_followed_by_question_still_requires_execution(self):
+        with patch('primebuddy.core.planner.chat', side_effect=[
+                {'role': 'assistant', 'content': '正在启动游戏，你准备好了吗？'},
+                self.responses()[0], self.responses()[2]]) as chat:
+            proposal = plan('启动这个应用', self.registry, context=self.context)
+        self.assertEqual(proposal['tasks'], [self.task])
+        self.assertEqual(chat.call_count, 3)
+        self.assertFalse(self.calls.exists())
+
+    def test_failed_task_followed_by_action_promise_does_not_retry_planning(self):
+        with patch('primebuddy.core.planner.chat', side_effect=[*self.responses(),
+                {'role': 'assistant', 'content': '我马上重新启动应用。'}]) as chat:
+            proposal = plan('打开应用', self.registry)
+            with self.assertRaisesRegex(ValueError, '未成功|承诺'):
+                continue_plan(proposal, {'one': {'status': 'failed', 'message': '状态未确认'}}, self.registry)
+        self.assertEqual(chat.call_count, 4)
+        self.assertFalse(self.calls.exists())
+
     def test_skill_must_be_read_before_any_execution(self):
         with patch('primebuddy.core.planner.chat', return_value=tool('execute_tasks', {'tasks': [self.task]}, 'execute')), \
                 patch('primebuddy.skills.manager.load_entry') as load:
@@ -152,6 +207,18 @@ def planning_context(context):
             final = continue_plan(proposal, result, self.registry)
         self.assertEqual(result['second']['message'], '你好，第二位')
         self.assertEqual(final['tasks'], [])
+
+    def test_exclusive_interaction_result_cannot_schedule_another_task(self):
+        self.registry.skills['hello']['actions']['hello']['interaction'] = 'exclusive'
+        second = dict(self.task, id='second', args={'name': '未经新请求的任务'})
+        with patch('primebuddy.core.planner.chat', side_effect=[*self.responses(),
+                tool('execute_tasks', {'tasks': [second]}, 'second')]) as chat:
+            proposal = plan('启动交互应用', self.registry)
+            final = continue_plan(proposal, {'one': {'status': 'success', 'message': '游戏结束'}}, self.registry)
+        self.assertEqual(final, {'reply': '', 'tasks': []})
+        self.assertEqual(chat.call_count, 3)
+        self.assertIsNone(proposal.call_id)
+        self.assertFalse(self.calls.exists())
 
     def test_runaway_read_loop_is_bounded(self):
         calls = iter(tool('read_skill_file', {'skill': 'hello', 'path': 'SKILL.md'}, str(i)) for i in range(20))

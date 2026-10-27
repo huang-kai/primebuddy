@@ -150,6 +150,7 @@ def run_process(command, *, cwd, env, runtime, cancelled, timeout=600,
                 continue
             available = max(0, max_output_bytes - output_size)
             output_files[key.data].write(chunk[:available])
+            output_files[key.data].flush()
             output_size += min(available, len(chunk))
             if len(chunk) > available:
                 output_limit = True

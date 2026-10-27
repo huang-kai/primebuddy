@@ -20,11 +20,45 @@ MODEL = 'qwen3-asr-flash'
 NEW_MODEL = 'qwen-audio-3.1-asr-flash'
 SAMPLE = 'https://dashscope.oss-cn-beijing.aliyuncs.com/audios/welcome.mp3'
 logger = logging.getLogger(__name__)
+# 只保留官方已列出的错误码；未知值可能含请求内容，不能直接记录。
+# https://help.aliyun.com/zh/model-studio/error-code
+HTTP_ERROR_CODES = frozenset({
+    'InvalidParameter', 'InternalError.Algo.InvalidParameter',
+    'InvalidFile.AudioLengthError', 'InvalidFile.DownloadFailed',
+    'DataInspectionFailed', 'data_inspection_failed', 'CLIENT_ERROR',
+})
+HTTP_ERROR_LIMIT = 4096
 
 
 def request_log(stage, elapsed, **details):
-    # 仅接收状态、类型、errno 和耗时；不记录异常正文、请求或响应数据。
+    # 仅接收状态、类型、errno、耗时及已校验的错误码/请求 ID，不记录正文。
     logger.info('ASR_REQUEST %s', json.dumps(dict(stage=stage, seconds=round(elapsed, 3), **details)))
+
+
+def http_error_details(error):
+    try:
+        with error:
+            data = error.read(HTTP_ERROR_LIMIT + 1)
+        result = json.loads(data) if len(data) <= HTTP_ERROR_LIMIT else {}
+    except (OSError, ValueError, TypeError, RecursionError, http.client.HTTPException):
+        result = {}
+    if not isinstance(result, dict):
+        result = {}
+    problem = result.get('error', result)
+    code = problem.get('code') if isinstance(problem, dict) else None
+    details = {}
+    if isinstance(code, str) and code in HTTP_ERROR_CODES:
+        details['service_code'] = code
+    # 3.1 实测静音返回此精确组合；不能把其他参数/权限错误吞成空识别。
+    if code == 'CLIENT_ERROR' and problem.get('message') == 'ASR_RESPONSE_HAVE_NO_WORDS':
+        details['reason'] = 'no_words'
+    header_id = error.headers.get('x-request-id') if error.headers else None
+    for request_id in (result.get('request_id'), header_id):
+        if isinstance(request_id, str) and re.fullmatch(
+                r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}', request_id):
+            details['request_id'] = request_id.lower()
+            break
+    return details
 
 
 def endpoint(host):
@@ -97,7 +131,11 @@ def recognize(audio, config, model=None, vocabulary=None):
                 request_log('json', time.monotonic() - received)
     except urllib.error.HTTPError as error:
         status = error.code if type(error.code) is int else None
-        request_log('http_error', time.monotonic() - started, http_status=status)
+        elapsed = time.monotonic() - started
+        details = http_error_details(error)
+        request_log('http_error', elapsed, http_status=status, **details)
+        if status == 400 and body['model'] == NEW_MODEL and details.get('reason') == 'no_words':
+            return ''
         hints = {401: '核对密钥与地域', 403: '核对模型权限',
                  404: '核对 API Host 和模型', 429: '核对配额、余额或限流'}
         raise AsrError(f'ASR HTTP {status}；' + hints.get(status, '请核对百炼调用状态')) from None
@@ -116,8 +154,8 @@ def recognize(audio, config, model=None, vocabulary=None):
                 else result['choices'][0]['message']['content'])
     except (KeyError, IndexError, TypeError):
         raise AsrError('ASR 返回结构不符合预期。') from None
-    if not isinstance(text, str) or not text.strip():
-        raise AsrError('ASR 没有返回识别文字。')
+    if not isinstance(text, str):
+        raise AsrError('ASR 返回的识别文字格式无效。')
     return text.strip()
 
 

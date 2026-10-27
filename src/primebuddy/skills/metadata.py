@@ -7,6 +7,11 @@ from primebuddy.config.storage import SetupError, parse_config, read_config, ski
 MAX_DOCUMENT = 65536
 
 
+def validate_interaction(action):
+    if 'interaction' in action and action['interaction'] != 'exclusive':
+        raise SetupError('interaction 仅支持 exclusive；普通动作不声明该字段。')
+
+
 def parse_skill_document(content, path):
     if len(content.encode('utf-8')) > MAX_DOCUMENT:
         raise SetupError('技能说明超过 64 KiB：' + str(path))
@@ -60,10 +65,18 @@ def load_skill_metadata(root):
         options = package.get('primebuddy', {})
         if not isinstance(options, dict):
             raise SetupError('primebuddy 可选适配须为键值对象。')
+        mode = options.get('mode', 'task')
+        if not isinstance(mode, str) or mode not in ('task', 'exclusive'):
+            raise SetupError('primebuddy.mode 仅支持 task 或 exclusive。')
+        if 'cli' in options:
+            if not isinstance(options['cli'], dict):
+                raise SetupError('primebuddy.cli 须为命令映射对象。')
+            if any(key in options for key in ('entrypoint', 'actions', 'setup', 'configure')):
+                raise SetupError('primebuddy.cli 不能与旧原生入口或配置声明混用。')
         if type(options.get('api_version', 1)) is not int or options.get('api_version', 1) != 1:
             raise SetupError('不支持的 PrimeBuddy 原生工具适配版本。')
         data = dict(options, name=frontmatter['name'], description=frontmatter['description'],
-                    version=version, instructions=instructions, document=document, package=package)
+                    version=version, mode=mode, instructions=instructions, document=document, package=package)
         for field in ('entrypoint', 'setup'):
             if field in data:
                 resolve_skill_file(root, data[field])
@@ -83,6 +96,7 @@ def load_skill_metadata(root):
             skill_name(name)
             if not isinstance(action, dict) or not isinstance(action.get('parameters'), dict):
                 raise SetupError('原生工具须声明参数。')
+            validate_interaction(action)
             resources = action.setdefault('resources', ['skill.' + data['name']])
             if not isinstance(resources, list) or any(not isinstance(r, str) or not r for r in resources):
                 raise SetupError('技能资源声明无效。')

@@ -120,6 +120,17 @@ class RuntimeTests(unittest.TestCase):
         self.plan['tasks'][1]['after'] = ['music']
         validate_plan(self.plan, self.registry)
 
+    def test_exclusive_interaction_rejects_parallel_and_ordered_other_tasks(self):
+        self.registry.skills['diangetai']['actions']['play']['interaction'] = 'exclusive'
+        for dependencies in ([], ['music']):
+            self.plan['tasks'][1]['after'] = dependencies
+            spoken = []
+            with self.subTest(after=dependencies), self.assertRaisesRegex(ValueError, '独占交互应用'):
+                execute(self.plan, self.registry, Context(), spoken.append)
+            self.assertEqual(spoken, [])
+        self.plan['tasks'] = self.plan['tasks'][:1]
+        self.assertIs(validate_plan(self.plan, self.registry), self.plan)
+
     def test_announcement_failure_prevents_write(self):
         events = []
         def broken(_):

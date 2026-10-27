@@ -51,15 +51,20 @@ class NativeVoiceInput:
         except queue.Full:
             self.error = AudioError('原厂语音事件积压，技能将退出。')
 
-    def listen(self, generation):
+    def listen(self, generation, *, reset_deadline=True):
         if self.current(generation):
+            now = time.monotonic()
+            if not reset_deadline and now >= self.deadline:
+                self.timeout('未识别到有效语音，等待原厂重新开放监听。')
+                return
             self.phase = 'listening'
             self.wait_for_new_listening = False
             self.buffer = None
-            self.deadline = time.monotonic() + 30
-            self.opened_at_ns = self.robot.node.get_clock().now().nanoseconds
+            if reset_deadline:
+                self.deadline = now + 30
+                self.opened_at_ns = self.robot.node.get_clock().now().nanoseconds
             self.window_packets = self.window_stream_packets = self.window_stale_packets = 0
-            trace('listen_window_open', seconds=30, native_state=self.conversation_state)
+            trace('listen_window_open', seconds=round(self.deadline - now, 3), native_state=self.conversation_state)
 
     def monitor_interrupt(self, generation):
         """暂存完整语句；调用方必须已有明确的取消来源，不能把 VAD 当作唤醒。"""
@@ -111,6 +116,23 @@ class NativeVoiceInput:
         if self.current(generation):
             self.phase = 'muted'
             self.buffer = None
+
+    def reset_interaction(self, generation):
+        """独占应用交接边界：废弃旧回调、残句及事件，保持静音直到宿主恢复监听。"""
+        if not self.current(generation):
+            return self.generation
+        self.idle(generation)
+        self.generation += 1
+        self.deadline = self.started_at = self.last_packet_at = 0
+        self.wait_for_new_listening = False
+        self._clear_interrupts()
+        while True:
+            try:
+                self.events.get_nowait()
+            except queue.Empty:
+                break
+        trace('interaction_reset', generation=self.generation)
+        return self.generation
 
     def wait_for_listening(self, generation):
         if self.current(generation):

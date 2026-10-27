@@ -125,6 +125,62 @@ class AudioOutputTests(unittest.TestCase):
         self.output.close()
         self.assertEqual(self.events.count('node_close'), 1)
 
+    def test_queued_callbacks_keep_playback_timing_with_nonblocking_host_checkpoint(self):
+        # 真机复现：32 个旧 callback + 每次额外等待 50ms，把正常 4.72 秒播放测成提前结束。
+        for host_wait in (.05, 0):
+            now, players = [0.0], []
+            class BufferedRobot:
+                def __init__(self, runtime):
+                    self.pending = [(0, lambda: None) for _ in range(32)]
+                def spin(self, seconds=.05, **kwargs):
+                    if self.pending:
+                        ready_at, callback = self.pending[0]
+                        now[0] += min(seconds, max(0, ready_at - now[0]))
+                        if ready_at <= now[0]:
+                            self.pending.pop(0)
+                            callback()
+                def close(self):
+                    pass
+            class Prepared(self.Prepared):
+                def __init__(self, *args):
+                    super().__init__(*args)
+                    self.seconds = 4.72
+                    self.limited = False
+            def media(robot):
+                player = NativeMediaTests().player()
+                player.robot, player.submitted = robot, False
+                player.play_type = SimpleNamespace(Request=lambda: SimpleNamespace(
+                    media_file_req=SimpleNamespace(priority_level=SimpleNamespace(value=0))))
+                player.play_client = object()
+                def call(client, request):
+                    started_at = now[0]
+                    for offset, status in ((0, 2), (4.72, 3)):
+                        message = SimpleNamespace(trace_id=player.trace_id, tts_status=SimpleNamespace(value=status))
+                        robot.pending.append((started_at + offset, lambda message=message: player.on_status(message)))
+                    return SimpleNamespace(tts_resp=SimpleNamespace(is_success=True))
+                player.call = call
+                player.close = player.stop
+                players.append(player)
+                return player
+            def host_checkpoint():
+                now[0] += host_wait
+            with self.subTest(host_wait=host_wait), \
+                    patch('primebuddy.voice.audio.RobotAudio', BufferedRobot), \
+                    patch('primebuddy.voice.audio.PreparedAudio', Prepared), \
+                    patch('primebuddy.voice.audio.NativeMedia', media), \
+                    patch('primebuddy.integrations.primebot.native_media.time.monotonic', side_effect=lambda: now[0]):
+                output = AudioOutput(Path('/unused'), lambda: None)
+                try:
+                    if host_wait:
+                        with self.assertRaisesRegex(AudioError, '提前停止'):
+                            output.play('https://example.com/audio', checkpoint=host_checkpoint)
+                    else:
+                        result = output.play('https://example.com/audio', checkpoint=host_checkpoint)
+                        self.assertEqual(result, {'seconds': 4.72, 'limited': False})
+                    self.assertFalse(players[0].submitted)
+                finally:
+                    output.close()
+
 
 class NativeMediaTests(unittest.TestCase):
     def player(self):

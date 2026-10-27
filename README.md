@@ -392,27 +392,35 @@ print('你好，' + args.name)
 
 只用 Python 标准库时无需额外依赖。需要第三方库时，在技能根目录的 `requirements.txt` 中使用 `包名==版本号` 声明，安装器会将依赖放到技能自己的 `_deps/`。
 
-### 可选：由 Buddy 配置 CLI 调用
+### 可选：配置 CLI 调用与运行模式
 
-普通脚本只需在 `SKILL.md` 写清命令。需要具名动作、参数校验、资源互斥或更具体的硬超时时，在 **Buddy 的** `~/.primebuddy/cfg/skill-adapters.yaml` 添加可选映射，例如：
+普通脚本只需在 `SKILL.md` 写清命令。需要具名动作、参数校验、资源互斥或更具体的硬超时时，可在技能自己的 `cfg/pkg.yaml` 声明模式和命令，例如：
 
 ```yaml
-hello:
-  actions:
-    greet:
-      command: [scripts/greet.py, '{name}']
-      parameters:
-        name: {type: string}
-      resources: []
-      timeout_seconds: 30
-      description: 正在问候 {name}
+primebuddy:
+  mode: task
+  cli:
+    actions:
+      greet:
+        command: [scripts/greet.py, '{name}']
+        parameters:
+          name: {type: string}
+        resources: []
+        timeout_seconds: 30
+        description: 正在问候 {name}
 ```
 
 `command` 是技能内脚本和参数列表，不是 shell 字符串。模板只替换已声明参数和 `{config}`、`{data}`、`{runtime}`；模型不能改脚本入口、资源或执行期限。未适配的通用脚本默认共用 `skill.scripts`，硬期限为 600 秒。已适配的技能只暴露声明动作，避免从原始脚本入口绕过资源和清理约束。
 
-点歌台和易来的默认映射见 [skill-adapters.example.yaml](cfg/skill-adapters.example.yaml)。用户配置按技能名称替换默认条目，值设为 `null` 可禁用该适配。`configure` 可映射技能自己的交互式配置命令；`context`、动作的 `preflight`、`confirmation` 可映射已有的只读查询或预览命令。它们都是可选 CLI 用法，不要求技能实现同名 Python 函数。配置与登录只在 Console 进行。
+`mode` 未声明时默认为 `task`，普通任务保持现有执行流程；`exclusive` 表示由技能负责整局语音交互。模式属于技能包元数据，不由 LLM 或游戏中的语音指令修改。`primebuddy.cli` 不能与旧版 `entrypoint/actions/setup/configure` 声明混用。
+
+宿主仍可在 `~/.primebuddy/cfg/skill-adapters.yaml` 以技能名映射同样的 CLI 内容，优先级为用户配置、宿主默认映射、技能包声明。点歌台、易来及旧名成语接龙的兼容映射见 [skill-adapters.example.yaml](cfg/skill-adapters.example.yaml)。用户配置可替换命令，但不会取消技能声明的独占模式；`null` 可禁用普通适配，独占技能遇到禁用或缺少启动、状态、恢复命令时明确报错，不回退到通用脚本。`configure` 映射交互式配置命令；`context`、动作的 `preflight`、`confirmation` 可映射已有的只读查询或预览命令。它们不要求技能实现同名 Python 函数。配置与登录只在 Console 进行。
 
 设备程序应自行处理标准终止信号和原厂业务收尾。对需要确认外部设备释放的技能，可以配置 `status` 和 `recover` 命令：前者返回实际状态，后者执行技能自身提供的恢复操作。设备隔离需要状态查询返回 `status: success`、`resources_released: true` 才能解除。进程清理未确认时还须独立核对旧进程的 PID 和启动身份，设备空闲不能代替进程退出证明；查询失败、超时或无法确认均保留私有记录，阻止占用相关资源。普通文本 CLI 不需要使用这组可选 JSON 字段。
+
+独立多轮语音应用在技能包声明 `primebuddy.mode: exclusive`，并在 `primebuddy.cli` 中提供启动动作、`status` 和 `recover`。Buddy 自动为动作声明独占交互和麦克风、扬声器资源；动作必须是本批唯一任务。应用以前台进程覆盖整局，Buddy 在此期间暂停自己的语音识别和任务分发，原厂唤醒及收音前端继续供游戏使用。应用退出且独立状态查询确认资源释放后，Buddy 清除旧音频事件、开启新的监听轮次，等待用户新请求，不根据原启动请求自动继续安排其他技能。成语接龙的[完整包配置](https://github.com/huang-kai/primeskills/blob/main/chengyu-chain/cfg/pkg.yaml)使用 `play --hosted`，原厂语音模式仍由 Buddy 管理；应用不得重复接管或恢复模式。正常退出由游戏意图和静默时限控制，宿主另设 86400 秒硬上限。旧宿主映射中的动作级 `interaction: exclusive` 继续兼容。
+
+Buddy 与独立成语应用共用本机 `/tmp/primebot-voice-frontend.lock`，前端清理完成前保持持锁；hosted 游戏由 Buddy 持有该锁，不重复获取。该互斥只覆盖同一控制器、同一文件系统，双板设备不能分别在两块板上启动语音应用。原有私有运行目录的 `audio.lock` 继续生效；共享锁拒绝符号链接和不安全的文件权限，不要删除正在使用的锁文件。
 
 旧包的 `entrypoint/actions` 和可选 hooks 继续通过一次性 worker 子进程兼容，业务模块不再导入 Buddy 主进程；它们仍属于旧宿主协议，且同样只暴露已声明动作。新的点歌台和易来已迁移普通 CLI，不采用这条路径。
 

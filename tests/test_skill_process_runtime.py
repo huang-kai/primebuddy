@@ -1,4 +1,5 @@
 """普通 CLI 技能与宿主适配、监督器、调度器的真实进程集成。"""
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -55,6 +56,13 @@ elif args.operation == 'play':
         (args.runtime / 'child.pid').write_text(str(child.pid))
         busy.unlink()
         time.sleep(.2)
+        raise SystemExit(0)
+    if args.mode == 'interactive':
+        print(json.dumps({'status': 'success', 'message': 'application started'}), flush=True)
+        (args.runtime / 'ready').touch()
+        while not (args.runtime / 'finish').exists():
+            time.sleep(.01)
+        busy.unlink()
         raise SystemExit(0)
     if args.mode == 'stuck':
         stuck.touch()
@@ -154,6 +162,68 @@ class SkillProcessRuntimeTests(unittest.TestCase):
         self.assertFalse((self.data / 'busy').exists())
         self.assertEqual(announcements[-1], result['message'])
         self.assertNotIn('primebuddy', CLI)
+
+    def test_small_stdout_and_stderr_are_visible_while_child_is_still_running(self):
+        finish = self.root / 'finish-output'
+        source = ('from pathlib import Path\nimport sys, time\n'
+                  'print("live stdout", flush=True)\n'
+                  'print("live stderr", file=sys.stderr, flush=True)\n'
+                  'while not Path(sys.argv[1]).exists(): time.sleep(.01)\n')
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(run_process, [sys.executable, '-c', source, str(finish)],
+                                 cwd=self.root, env=os.environ.copy(), runtime=self.context.runtime,
+                                 cancelled=self.context.cancelled, timeout=5)
+            try:
+                directory = self.context.runtime / 'processes'
+                deadline = time.monotonic() + 3
+                observed = {}
+                while time.monotonic() < deadline and len(observed) < 2:
+                    for stream in ('stdout', 'stderr'):
+                        for path in directory.glob('*.' + stream):
+                            if path.read_text() == 'live ' + stream + '\n':
+                                observed[stream] = path
+                    if len(observed) < 2:
+                        time.sleep(.01)
+                self.assertEqual(set(observed), {'stdout', 'stderr'})
+                self.assertFalse(future.done(), '日志必须在子进程退出前可见')
+            finally:
+                finish.touch()
+                result = future.result(timeout=10)
+        self.assertEqual(result['returncode'], 0)
+        self.assertTrue(result['cleanup_confirmed'])
+        self.assertEqual(result['stdout'], 'live stdout\n')
+        self.assertEqual(result['stderr'], 'live stderr\n')
+
+    def test_exclusive_foreground_application_must_exit_before_success_is_reported(self):
+        (self.skill / 'cfg').mkdir()
+        (self.skill / 'cfg/pkg.yaml').write_text(json.dumps({'primebuddy': {
+            'mode': 'exclusive', 'cli': self.registry.skills['media-fixture']['adapter']}}))
+        with patch('primebuddy.skills.registry.load_adapters', return_value={}):
+            self.registry = Registry(self.skills)
+        self.addCleanup(self.registry.close)
+        announcements = []
+        observations = []
+        def checkpoint():
+            if (self.data / 'ready').exists() and not (self.data / 'finish').exists():
+                self.assertEqual(len(announcements), 1)
+                self.assertTrue((self.data / 'busy').exists())
+                observations.append('foreground still owns resources')
+                (self.data / 'finish').touch()
+        result = execute(self.plan(self.task(mode='interactive')), self.registry, self.context,
+                         announce=announcements.append, checkpoint=checkpoint)
+        self.assertEqual(observations, ['foreground still owns resources'])
+        self.assertEqual(result['first']['status'], 'success')
+        self.assertFalse((self.data / 'busy').exists())
+        self.assertEqual(len(announcements), 1)
+
+    def test_exclusive_application_zero_exit_does_not_override_unreleased_device(self):
+        self.registry.skills['media-fixture']['actions']['play']['interaction'] = 'exclusive'
+        announcements = []
+        with self.assertRaises(CleanupUnconfirmed):
+            execute(self.plan(self.task(mode='orphan')), self.registry, self.context,
+                    announce=announcements.append)
+        self.assertEqual(len(announcements), 1)
+        self.assertTrue((self.data / 'cleanup-unconfirmed.json').exists())
 
     def test_cancel_and_turn_interrupt_wait_for_cleanup_before_returning(self):
         for interrupted in (False, True):
