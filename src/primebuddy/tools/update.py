@@ -116,6 +116,9 @@ def skill_updates(home, manifest):
             compatible = True
         except SetupError:
             compatible = False
+        if compatible:
+            # 推荐版本用于新安装，不代表兼容的现有技能必须随平台更新。
+            continue
         managed = root == home / 'skills' / name and not root.is_symlink() and 'directory' not in record
         if not managed:
             if not compatible and record['enabled']:
@@ -290,7 +293,8 @@ def run_update(*, check=False, version=None, recover=False):
         unpack(archive, temporary / 'unpacked')
         source = temporary / 'unpacked/primebuddy'
         embedded = load_release(source / 'release.json')
-        if (embedded['version'], embedded['skills']) != (manifest['version'], manifest['skills']):
+        if (embedded['version'], embedded['skills'], embedded.get('bundled_skills')) != (
+                manifest['version'], manifest['skills'], manifest.get('bundled_skills')):
             raise SetupError('框架包内兼容清单与发布清单不一致。')
         from primebuddy.tools.install import stage_application, prepare_dependencies, stage_launcher
         stage = temporary / 'stage'

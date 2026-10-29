@@ -31,6 +31,11 @@ def validate_release(data):
         version_tuple(data['version'])
         if not isinstance(data['skills'], dict):
             raise ValueError
+        if 'bundled_skills' in data:
+            bundled = data['bundled_skills']
+            if (not isinstance(bundled, list) or any(not isinstance(name, str) for name in bundled)
+                    or len(bundled) != len(set(bundled)) or any(name not in data['skills'] for name in bundled)):
+                raise ValueError
         for name, rule in data['skills'].items():
             if not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', name) or not isinstance(rule, dict):
                 raise ValueError

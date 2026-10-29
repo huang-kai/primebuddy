@@ -1,7 +1,7 @@
 """技能包可声明 CLI 映射和交互模式；宿主配置可覆盖命令。"""
 from string import Formatter
 
-from primebuddy.config.storage import application_directory, config_path, read_config, SetupError
+from primebuddy.config.storage import application_directory, config_path, get_data_directory, read_config, SetupError
 from primebuddy.skills.metadata import resolve_skill_file, validate_interaction
 
 
@@ -15,7 +15,16 @@ def adapt_metadata(data, root, adapters=None, *, check_compatibility=True):
     if check_compatibility:
         from primebuddy.config.compatibility import check_skill
         check_skill(data)
-    adapter = (load_adapters() if adapters is None else adapters).get(data['name'], data.get('cli'))
+    mappings = load_adapters() if adapters is None else adapters
+    adapter = mappings.get(data['name'], data.get('cli'))
+    if data.get('cli_version') == 1:
+        # 新协议以技能自己的声明为准；仅用户显式覆盖能替换，避免宿主默认值锁死旧 CLI。
+        home = get_data_directory()
+        path = home / 'cfg/skill-adapters.yaml'
+        overrides = read_config(path if path.exists() else home / 'skill-adapters.yaml')
+        adapter = overrides.get(data['name'], data['cli'])
+        if not isinstance(adapter, dict) or not adapter.get('configure'):
+            raise SetupError('协议 v1 的 CLI 覆盖必须保留 configure 安装向导。')
     exclusive = data.get('mode') == 'exclusive'
     if adapter is None:
         if exclusive:

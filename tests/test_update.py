@@ -126,6 +126,14 @@ class UpdatePlanTests(unittest.TestCase):
         self.skill(version='0.4.2', enabled=True)
         self.assertEqual(skill_updates(self.home, self.manifest), [])
 
+    def test_compatible_older_skill_is_not_upgraded_to_recommended(self):
+        from primebuddy.tools.update import skill_updates
+        self.skill(version='0.4.0', enabled=True)
+        self.manifest['skills']['diangetai']['recommended_version'] = '0.4.2'
+        before = {str(p): p.read_bytes() for p in self.home.rglob('*') if p.is_file()}
+        self.assertEqual(skill_updates(self.home, self.manifest), [])
+        self.assertEqual(before, {str(p): p.read_bytes() for p in self.home.rglob('*') if p.is_file()})
+
     def test_preview_does_not_download_packages_or_change_files(self):
         from primebuddy.tools import update
         self.skill()
@@ -164,7 +172,7 @@ class UpdateIntegrationTests(unittest.TestCase):
         self.release = self.root / 'release'
         project = Path(__file__).resolve().parents[1]
         collection = project.parent / 'primebuddy-skills'
-        build_release.build_releases(self.release, [collection / 'diangetai', collection / 'yeelight'], release=True)
+        build_release.build_releases(self.release, [collection / name for name in ('diangetai', 'yeelight', 'chengyu-chain')], release=True)
         self.manifest = json.loads((self.release / 'release.json').read_text())
         self.environment = patch.dict(os.environ, PRIMEBUDDY_HOME=str(self.home),
             PRIMEBUDDY_RUNTIME=str(self.home / 'runtime'), PRIMEBUDDY_LOG_DIR=str(self.root / 'logs'))
@@ -225,11 +233,33 @@ class UpdateIntegrationTests(unittest.TestCase):
         configure.assert_not_called()
         self.assert_upgraded()
 
+    def test_platform_update_preserves_compatible_skill_files_and_optional_absence(self):
+        from primebuddy.tools import update
+        skill = self.home / 'skills/diangetai'
+        (skill / 'cfg/pkg.yaml').write_text('version: 0.4.0\n')
+        self.manifest['skills']['diangetai']['recommended_version'] = '0.4.1'
+        # This skill should never be downloaded, even when recommendation changed.
+        before = {str(p.relative_to(skill)): p.read_bytes() for p in skill.rglob('*') if p.is_file()}
+        self.assertNotIn('diangetai', [item['name'] for item in update.skill_updates(self.home, self.manifest)])
+        # Restore valid published manifest for the framework/embedded-manifest comparison.
+        self.manifest['skills']['diangetai']['recommended_version'] = '0.4.0'
+        with patch.object(update, 'download_artifact', side_effect=self.download), \
+                patch('primebuddy.skills.manager.run_setup') as configure:
+            update.run_update()
+        configure.assert_not_called()
+        self.assertEqual(before, {str(p.relative_to(skill)): p.read_bytes() for p in skill.rglob('*') if p.is_file()})
+        self.assertFalse((self.home / 'skills/chengyu-chain').exists())
+        for name, content in self.private.items():
+            self.assertEqual((self.home / name).read_bytes(), content)
+
     def test_old_install_bootstrap_uses_bundled_versions_in_one_transaction(self):
         from primebuddy.skills.manager import unpack
         from primebuddy.tools import install
         unpack(self.release / 'primebuddy-1.1.0.rpk', self.root / 'unpacked')
         source = self.root / 'unpacked/primebuddy'
+        # 易来不在默认大包内；离线升级该旧技能须另行提供其独立包。
+        artifact = self.manifest['skills']['yeelight']['artifact']
+        shutil.copy2(self.release / artifact['filename'], source / 'resource/bundled' / artifact['filename'])
         with patch.object(install, '__file__', str(source / 'src/primebuddy/tools/install.py')), \
                 patch('primebuddy.tools.update.download_artifact') as download, \
                 patch('primebuddy.skills.manager.run_setup') as configure:

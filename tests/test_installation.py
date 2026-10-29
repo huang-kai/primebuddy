@@ -421,8 +421,8 @@ class ReleaseTests(unittest.TestCase):
             make_skill(collection / 'hello')
             make_skill(collection / 'other', version='0.2.0', name='other')
             make_skill(collection / 'unselected', name='unselected')
-            (source / 'docs').mkdir()
-            (source / 'docs/private.md').write_text('do-not-ship')
+            (source / 'design').mkdir()
+            (source / 'design/private.md').write_text('do-not-ship')
             old_bundle = source / 'resource/bundled/obsolete.zip'
             old_bundle.parent.mkdir(parents=True)
             old_bundle.write_bytes(b'old package must not be copied')
@@ -439,7 +439,7 @@ class ReleaseTests(unittest.TestCase):
                 self.assertTrue(zipfile.is_zipfile(path))
                 with zipfile.ZipFile(path) as package:
                     self.assertIsNone(package.testzip())
-                    self.assertFalse(any('docs' in Path(name).parts for name in package.namelist()))
+                    self.assertFalse(any('design' in Path(name).parts for name in package.namelist()))
             with zipfile.ZipFile(output / f'primebuddy-{__version__}.rpk') as framework:
                 self.assertEqual(framework.read('primebuddy/LICENSE'), (ROOT / 'LICENSE').read_bytes())
                 self.assertEqual({name for name in framework.namelist() if name.startswith('primebuddy/resource/bundled/')},
@@ -540,7 +540,7 @@ class UI:
     def info(self, message): pass
     def header(self, *args): pass
     def confirm(self, *args, **kwargs): return False
-    def multiselect(self, label, choices, default=None): return default
+    def multiselect(self, label, choices, default=None): return [0]
 ui = UI()
 skills.install(sys.argv[1], ui)
 onboard(ui)
@@ -647,7 +647,7 @@ print('BUNDLE_UPGRADE_OK')
             self.assertFalse((data / 'app').exists())
             self.assertTrue((data / 'bin/primebuddy').is_file())
             self.assertTrue((data / 'main.py').is_file())
-            self.assertFalse((data / 'docs').exists())
+            self.assertTrue((data / 'docs/README.md').is_file())
             self.assertNotIn(str(app), (data / 'bin/primebuddy').read_text())
 
     def test_upgrade_replaces_code_and_preserves_private_files_and_installed_skills(self):
@@ -731,7 +731,7 @@ print('BUNDLE_UPGRADE_OK')
                 self.assertFalse(any(name.startswith(('primebuddy/data/', 'primebuddy/bin/',
                                                      'primebuddy/cfg/skills/', 'primebuddy/runtime/')) for name in names))
 
-    def test_release_without_docs_can_be_built_installed_and_run(self):
+    def test_release_with_docs_can_be_built_installed_and_run(self):
         installer = self.installer()
         from primebuddy.tools import build_release
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ), \
@@ -742,13 +742,13 @@ print('BUNDLE_UPGRADE_OK')
             with patch.object(build_release, 'ROOT', source):
                 archive = build_release.build_releases(directory / 'release', [make_skill(directory / 'hello')])[0]
             with zipfile.ZipFile(archive) as package:
-                self.assertFalse(any(name.startswith('primebuddy/docs/') for name in package.namelist()))
+                self.assertIn('primebuddy/docs/README.md', package.namelist())
                 package.extractall(directory / 'unpacked')
             app = directory / 'unpacked/primebuddy'
             home = directory / 'installed'
             with patch.object(installer, '__file__', str(app / 'src/primebuddy/tools/install.py')):
                 launcher = installer.install(home)
-            self.assertFalse((home / 'docs').exists())
+            self.assertTrue((home / 'docs/README.md').is_file())
             self.assertTrue((home / 'resource/bundled/hello-0.1.0.rpk').is_file())
             result = subprocess.run([str(launcher), '--version'], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -811,7 +811,7 @@ class OnboardingTests(unittest.TestCase):
             onboard(ui)
         install.assert_not_called()
         configure.assert_not_called()
-        self.assertEqual(ui.multiselect.call_args.kwargs['default'], [0])
+        self.assertEqual(ui.multiselect.call_args.kwargs['default'], [])
 
     def test_newer_bundle_is_selected_for_upgrade_and_calls_its_own_setup(self):
         from unittest.mock import Mock
@@ -827,7 +827,7 @@ class OnboardingTests(unittest.TestCase):
             onboard(ui)
         install.assert_called_once_with('hello.zip', ui, replace=True)
         configure.assert_not_called()
-        self.assertEqual(ui.multiselect.call_args.kwargs['default'], [0])
+        self.assertEqual(ui.multiselect.call_args.kwargs['default'], [])
         self.assertIn('更新至 0.2.10', ui.multiselect.call_args.args[1][0])
 
     def test_bundle_does_not_downgrade_newer_installed_skill(self):
@@ -856,7 +856,7 @@ class OnboardingTests(unittest.TestCase):
                 patch('primebuddy.cli.onboarding.load_skill_records', return_value={'hello': {'ready': True, 'version': '0.1.0'}}),\
                 patch('primebuddy.cli.onboarding.install') as install, patch('primebuddy.cli.onboarding.configure') as configure:
             onboard(ui)
-        self.assertEqual(ui.multiselect.call_args.kwargs['default'], [0])
+        self.assertEqual(ui.multiselect.call_args.kwargs['default'], [])
         install.assert_not_called()
         configure.assert_not_called()
 

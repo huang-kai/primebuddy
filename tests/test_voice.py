@@ -78,6 +78,34 @@ class VoiceTests(unittest.TestCase):
         mic.listen(1)
         self.assertEqual(mic.phase, 'listening')
 
+    def test_exclusive_suspends_audio_health_and_reopen_callbacks_until_release(self):
+        mic = self.microphone()
+        mic.listen(0)
+        mic.events.put((0, 'utterance', b'old'))
+        generation = mic.suspend_interaction(0)
+        mic.ready.set()
+        mic.robot.node.count_publishers = Mock(return_value=0)
+        for state in (0, 3, 1):
+            mic.on_state(SimpleNamespace(main_state=SimpleNamespace(value=state)))
+            # 无需解析独占期间的消息，即使内容格式错误也不影响宿主。
+            mic.on_audio(object())
+            mic.check_health()
+            mic.listen(generation)
+            mic.wait_for_listening(generation)
+            mic.monitor_interrupt(generation)
+            mic.idle(generation)
+        self.assertEqual(mic.phase, 'exclusive')
+        self.assertIsNone(mic.error)
+        self.assertIsNone(mic.buffer)
+        self.assertTrue(mic.events.empty())
+        self.assertTrue(mic.interrupts.empty())
+        mic.robot.node.count_publishers.assert_not_called()
+        generation = mic.reset_interaction(generation)
+        mic.listen(generation)
+        for state in (1, 3):
+            mic.on_audio(self.audio(state))
+        self.assertEqual(mic.events.get_nowait()[:2], (2, 'utterance'))
+
     def test_native_listening_transition_opens_one_window(self):
         mic = self.microphone()
         mic.wait_for_listening(0)
@@ -365,7 +393,8 @@ class DialogueTests(unittest.TestCase):
     def dialogue(self, inputs, proposals, result=None, bridge=None, agent_messages=None, tool='yeelight',
                  executor=None, trace=None, prepare_error=None, ros_callbacks=None,
                  robot_series='T1', asr_vocabularies=None, on_wait=None,
-                 on_asr=None, on_plan=None, on_prepare=None, cancel_check=None, registry=None, simulate=True):
+                 on_asr=None, on_plan=None, on_prepare=None, cancel_check=None, registry=None, simulate=True,
+                 on_play=None, ensure_audio_idle=None):
         import tempfile
         from primebuddy.voice.session import serve
         registry = registry or VoiceRegistry()
@@ -387,6 +416,8 @@ class DialogueTests(unittest.TestCase):
         answers = iter(inputs)
         def play(text, on_finished=None):
             trace.append(('tts', text))
+            if on_play:
+                on_play(text)
             if on_finished:
                 on_finished()
         robot.play = play
@@ -400,7 +431,8 @@ class DialogueTests(unittest.TestCase):
                     finally:
                         checking_playback[0] = False
                 return play(text, on_finished=kwargs.get('on_finished'))
-            return SimpleNamespace(play=checked_play, close=lambda: None)
+            return SimpleNamespace(play=checked_play, close=lambda: None,
+                                   ensure_idle=ensure_audio_idle or (lambda: None))
         microphones = []
         class Microphone(NativeVoiceInput):
             def start(self):
@@ -549,7 +581,7 @@ class DialogueTests(unittest.TestCase):
             if calls[-1] != 'game':
                 return {'light': {'status': 'success', 'message': '灯已打开'}}
             self.assertTrue(bridge.busy)
-            self.assertEqual((microphone.phase, microphone.generation), ('muted', 1))
+            self.assertEqual((microphone.phase, microphone.generation), ('exclusive', 1))
             for native_state in (0, 3, 1):
                 microphone.on_state(SimpleNamespace(main_state=SimpleNamespace(value=native_state)))
                 for state in (1, 3):
@@ -562,7 +594,7 @@ class DialogueTests(unittest.TestCase):
             microphone.interrupts.put(b'late interrupt')
             microphone.buffer = bytearray(b'late partial answer')
             def verify(context):
-                self.assertEqual((microphone.phase, microphone.generation), ('muted', 1))
+                self.assertEqual((microphone.phase, microphone.generation), ('exclusive', 1))
                 self.assertFalse(microphone.events.empty())
                 trace.append(('resources_released', True))
             registry.load('diangetai')._verify = Mock(side_effect=verify)
@@ -580,7 +612,7 @@ class DialogueTests(unittest.TestCase):
                          ['开始游戏', '打开天际线灯', '退出语音助手'])
         registry.load('diangetai')._verify.assert_called_once()
 
-    def test_exclusive_cleanup_failure_does_not_restore_host_listening(self):
+    def test_exclusive_cleanup_failure_keeps_host_alive_until_explicit_shutdown(self):
         for failure in ('execute', 'status'):
             registry = VoiceRegistry()
             registry.skills['diangetai']['actions']['play']['interaction'] = 'exclusive'
@@ -593,12 +625,51 @@ class DialogueTests(unittest.TestCase):
                 if failure == 'execute':
                     raise CleanupUnconfirmed('尚未释放')
                 return {'game': {'status': 'success', 'message': '整局结束'}}
-            with self.subTest(failure=failure), self.assertRaises(CleanupUnconfirmed):
+            def shutdown_after_retry():
+                if registry.load('diangetai')._verify.call_count >= 2:
+                    self.assertFalse(microphones[0].closed.is_set())
+                    self.assertEqual(microphones[0].phase, 'exclusive')
+                    raise KeyboardInterrupt()
+            with self.subTest(failure=failure), self.assertRaises(KeyboardInterrupt), \
+                    patch('primebuddy.voice.session.INTERACTION_RECOVERY_INTERVAL', 0):
                 self.dialogue(['开始游戏'], [proposal], executor=executor, registry=registry,
-                              trace=trace, simulate=False)
+                              trace=trace, simulate=False, cancel_check=shutdown_after_retry)
             self.assertEqual(microphones[0].generation, 1)
             self.assertNotIn(('tts', '接下来，你还想让我帮你做些什么呢？'), trace)
             self.assertNotIn(('listen', 2), trace)
+
+    def test_exclusive_cleanup_retry_recovers_then_accepts_a_new_skill(self):
+        for failure in ('execute', 'status'):
+            registry = VoiceRegistry()
+            registry.skills['diangetai']['actions']['play']['interaction'] = 'exclusive'
+            proposal = {'reply': '', 'tasks': [{'id': 'game', 'skill': 'diangetai', 'action': 'play',
+                        'args': {'artist': '', 'song': '交互应用测试'}, 'after': []}]}
+            trace, microphones, attempts = [], [], []
+            def verify(context, *, recover=False):
+                self.assertEqual(microphones[0].phase, 'exclusive')
+                self.assertEqual([v for k, v in trace if k == 'asr'], ['开始游戏'])
+                attempts.append(recover)
+                if len(attempts) == 1:
+                    raise CleanupUnconfirmed('清理暂未完成')
+                trace.append(('recovered', True))
+            registry.load('diangetai')._verify = Mock(side_effect=verify)
+            def executor(plan, registry, context, announce, microphone, **kwargs):
+                if plan['tasks'][0]['id'] != 'game':
+                    trace.append(('new_skill', True))
+                    return {'light': {'status': 'success', 'message': '灯已打开'}}
+                microphones.append(microphone)
+                microphone.events.put((microphone.generation, 'utterance', b'old game answer'))
+                if failure == 'execute':
+                    context.cancelled.set()
+                    raise CleanupUnconfirmed('游戏异常退出，设备清理未确认')
+                return {'game': {'status': 'success', 'message': '整局结束'}}
+            with self.subTest(failure=failure), patch('primebuddy.voice.session.INTERACTION_RECOVERY_INTERVAL', 0):
+                self.dialogue(['开始游戏', '打开天际线灯', '退出语音助手'], [proposal, self.proposal()],
+                              executor=executor, registry=registry, trace=trace, simulate=False)
+            self.assertEqual(attempts, [failure == 'execute', True])
+            self.assertLess(trace.index(('recovered', True)), trace.index(('listen', 2)))
+            self.assertLess(trace.index(('listen', 2)), trace.index(('new_skill', True)))
+            self.assertEqual([v for k, v in trace if k == 'asr'], ['开始游戏', '打开天际线灯', '退出语音助手'])
 
     def test_exclusive_failure_verifies_release_before_new_generation_and_error_prompt(self):
         registry = VoiceRegistry()
@@ -659,6 +730,47 @@ class DialogueTests(unittest.TestCase):
         self.assertEqual(sum(event == ('tts', NETWORK_ERROR_PROMPT) for event in trace), 1)
         self.assertFalse(any(event[0] == 'execute' for event in trace))
 
+    def test_interrupted_exclusive_acknowledgement_recovers_and_accepts_retry(self):
+        registry = VoiceRegistry()
+        registry.skills['diangetai']['actions']['play']['interaction'] = 'exclusive'
+        trace = []
+        registry.load('diangetai')._verify = Mock(
+            side_effect=lambda context: trace.append(('verified_cancelled', context.cancelled.is_set())))
+        proposal = {'reply': '', 'tasks': [{'id': 'game', 'skill': 'diangetai', 'action': 'play',
+                    'args': {'artist': '', 'song': '交互应用测试'}, 'after': []}]}
+        interrupted = []
+        def play(text):
+            if text.startswith(('好的，', '收到，', '明白，')) and not interrupted:
+                interrupted.append(text)
+                raise AudioError('原厂音频提前停止或播放失败。')
+        self.dialogue(['开始游戏', '开始游戏', '退出语音助手'], [proposal, proposal],
+                      registry=registry, trace=trace, tool='diangetai', simulate=False, on_play=play)
+        error_prompt = next(event for event in trace if event[0] == 'tts' and event[1].startswith('本轮未能完整完成'))
+        self.assertLess(trace.index(('verified_cancelled', True)), trace.index(error_prompt))
+        self.assertLess(trace.index(error_prompt), trace.index(('listen', 2)))
+        self.assertEqual(sum(event[0] == 'execute' for event in trace), 1)
+        self.assertIn(('verified_cancelled', False), trace)
+        self.assertIn(('tts', '接下来，你还想让我帮你做些什么呢？'), trace)
+        self.assertIn(('tts', '语音助手已退出。'), trace)
+
+    def test_interrupted_acknowledgement_with_unreleased_resources_does_not_resume(self):
+        registry = VoiceRegistry()
+        trace, blocked = [], []
+        def check_resources(context, resources):
+            if context.cancelled.is_set():
+                blocked.append(context)
+                raise CleanupUnconfirmed('扬声器尚未释放')
+        registry.check_resources.side_effect = check_resources
+        def play(text):
+            if text.startswith(('好的，', '收到，', '明白，')):
+                raise AudioError('原厂音频提前停止或播放失败。')
+        with self.assertRaisesRegex(CleanupUnconfirmed, '扬声器尚未释放'):
+            self.dialogue(['播放小星星'], [self.proposal()], registry=registry,
+                          trace=trace, on_play=play, simulate=False)
+        self.assertEqual(len(blocked), 1)
+        self.assertFalse(any(event[0] == 'tts' and event[1].startswith('本轮未能完整完成') for event in trace))
+        self.assertFalse(any(event[0] == 'execute' for event in trace))
+
     def test_startup_tts_network_failure_uses_notice_then_waits_for_native(self):
         def prepare(text):
             if text == 'PrimeBuddy 已启动，你想做什么？':
@@ -698,15 +810,51 @@ class DialogueTests(unittest.TestCase):
         self.assertEqual(sum(event == ('tts', NETWORK_ERROR_PROMPT) for event in trace), 1)
         self.assertNotIn(('tts', '接下来，你还想让我帮你做些什么呢？'), trace)
 
-    def test_failed_offline_notice_does_not_retry_or_recurse(self):
+    def test_failed_offline_notice_waits_for_native_and_accepts_next_turn(self):
         prepared = []
         def prepare(text):
             prepared.append(text)
             if text == NETWORK_ERROR_PROMPT:
                 raise AudioError('本地提示音无法播放')
-        with self.assertRaisesRegex(AudioError, '本地提示音'):
-            self.dialogue([AsrNetworkError()], [], on_prepare=prepare)
+        trace, _ = self.dialogue([AsrNetworkError(), '退出语音助手'], [], on_prepare=prepare)
         self.assertEqual(prepared.count(NETWORK_ERROR_PROMPT), 1)
+        self.assertEqual(sum(event[0] == 'waiting' for event in trace), 2)
+        self.assertIn(('tts', '语音助手已退出。'), trace)
+
+    def test_failed_recovery_prompt_keeps_host_available(self):
+        def play(text):
+            if text.startswith(('好的，', '收到，', '明白，', '本轮未能完整完成')):
+                raise AudioError('原厂音频被打断')
+        trace, _ = self.dialogue(['播放小星星', '你好', '退出语音助手'],
+                                [self.proposal(), {'reply': '你好。', 'tasks': []}], on_play=play)
+        self.assertEqual(sum(event[0] == 'waiting' for event in trace), 2)
+        self.assertIn(('tts', '你好。'), trace)
+        self.assertIn(('tts', '语音助手已退出。'), trace)
+
+    def test_failed_recovery_prompt_with_unconfirmed_audio_does_not_resume(self):
+        def play(text):
+            if text.startswith('本轮未能完整完成'):
+                raise AudioError('停止未确认')
+        idle = Mock(side_effect=[None, CleanupUnconfirmed('停止未确认')])
+        trace = []
+        with self.assertRaises(CleanupUnconfirmed):
+            self.dialogue(['你好'], [ValueError('invalid')], trace=trace,
+                          on_play=play, ensure_audio_idle=idle)
+        self.assertEqual(trace.count(('waiting', 'waiting')), 1)
+
+    def test_global_exit_during_recovery_prompt_still_exits(self):
+        stopped = []
+        def play(text):
+            if text.startswith('本轮未能完整完成'):
+                stopped.append(True)
+                raise AudioError('收到退出信号')
+        def check():
+            if stopped:
+                raise AudioError('收到退出信号')
+        trace = []
+        with self.assertRaisesRegex(AudioError, '退出信号'):
+            self.dialogue(['你好'], [ValueError('invalid')], trace=trace, on_play=play, cancel_check=check)
+        self.assertEqual(trace.count(('waiting', 'waiting')), 1)
 
     def test_exit_signal_received_during_asr_prevents_llm_and_more_tts(self):
         import threading

@@ -4,6 +4,7 @@ import threading
 import unittest
 from unittest.mock import patch
 from primebuddy.voice.audio import AudioOutput
+from primebuddy.core.engine import CleanupUnconfirmed
 from primebuddy.integrations.primebot.robot_audio import AudioError
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -58,6 +59,20 @@ class AudioOutputTests(unittest.TestCase):
         events = [e for e in self.events if e != 'spin']
         self.assertEqual(events, ['prepare', 'ready', ('play', 60), 'started', 'tick',
                                   'finished', 'stop_owned', 'file_cleanup', 'node_close'])
+
+    def test_recovery_requires_confirmed_idle_audio(self):
+        self.output.ensure_idle()
+        self.output.media = NS(submitted=True, close=lambda: None)
+        with self.assertRaises(CleanupUnconfirmed):
+            self.output.ensure_idle()
+        self.output.media.submitted = False
+        self.output.ensure_idle()
+        with self.output.lock:
+            with self.assertRaises(CleanupUnconfirmed):
+                self.output.ensure_idle()
+        self.output.close()
+        with self.assertRaises(CleanupUnconfirmed):
+            self.output.ensure_idle()
 
     def test_failed_preparation_never_runs_motion_or_play(self):
         with patch.object(self.Prepared, 'wait_ready', side_effect=AudioError('decode failed')):

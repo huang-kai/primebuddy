@@ -11,6 +11,7 @@ from primebuddy.providers.errors import ProviderNetworkError
 from primebuddy.core.timing import measure
 
 logger = logging.getLogger(__name__)
+INTERACTION_RECOVERY_INTERVAL = 5.0
 
 
 def serve(registry, context, sdk_bridge='namespaced'):
@@ -91,9 +92,30 @@ def serve(registry, context, sdk_bridge='namespaced'):
             def ask(text, generation):
                 speak(text, on_finished=lambda: microphone.listen(generation))
 
+            def recover_prompt(text, generation):
+                try:
+                    try:
+                        ask(text, generation)
+                    except ProviderNetworkError:
+                        if text == NETWORK_ERROR_PROMPT:
+                            raise
+                        ask(NETWORK_ERROR_PROMPT, generation)
+                except CleanupUnconfirmed:
+                    raise
+                except Exception as error:
+                    check_cancel()
+                    registry.check_resources(context, {'speaker'})
+                    audio_output.ensure_idle()
+                    logger.error('RECOVERY_PROMPT_FAILED %s', type(error).__name__)
+                    # 错误播报也可能失败；确认已停止后，等待原厂重新开放监听。
+                    microphone.wait_for_listening(generation)
+                    logger.info('VOICE_WAITING_FOR_NATIVE_LISTENING recovery')
+
             def checkpoint():
                 check_cancel()
                 robot.spin()
+                if microphone.phase == 'exclusive':
+                    return
                 microphone.check_health()
                 if microphone.error:
                     raise microphone.error
@@ -103,17 +125,38 @@ def serve(registry, context, sdk_bridge='namespaced'):
             def cleanup_checkpoint():
                 # 清理期间继续处理原厂订阅；不清除取消状态、不开始新任务或播报。
                 robot.spin(cancellable=False)
+                if microphone.phase == 'exclusive':
+                    return
                 microphone.check_health()
                 if microphone.error:
                     raise microphone.error
 
-            def release_interaction(task, generation):
+            def release_interaction(task, generation, *, recover=False):
                 # 子进程已由 execute 监督完成；独立查询设备状态后才能废弃游戏事件并交还监听。
-                if not context.simulate:
-                    registry.load(task['skill'])._verify(context)
                 resources = registry.skills[task['skill']]['actions'][task['action']]['resources']
-                registry.check_resources(context, resources)
-                return microphone.reset_interaction(generation)
+                while True:
+                    check_cancel()
+                    try:
+                        if not context.simulate:
+                            skill = registry.load(task['skill'])
+                            if recover:
+                                skill._verify(context, recover=True)
+                            else:
+                                skill._verify(context)
+                        registry.check_resources(context, resources)
+                    except CleanupUnconfirmed:
+                        # 旧进程/设备未释放时保持宿主存活和语音暂停，不能把清理失败当作退出 Buddy。
+                        # recover 仅处理该技能记录的资源，且由 _verify 先核对旧进程身份。
+                        logger.error('INTERACTION_RECOVERY_PENDING skill=%s', task['skill'])
+                        recover = True
+                        retry_at = time.monotonic() + INTERACTION_RECOVERY_INTERVAL
+                        while time.monotonic() < retry_at:
+                            check_cancel()
+                            robot.spin(cancellable=False)
+                            time.sleep(.02)
+                    else:
+                        logger.info('INTERACTION_RELEASED skill=%s', task['skill'])
+                        return microphone.reset_interaction(generation)
             try:
                 microphone.start()
                 deadline = time.monotonic() + 10
@@ -218,13 +261,16 @@ def serve(registry, context, sdk_bridge='namespaced'):
                             confirmed = False
                             interaction = exclusive_interaction(proposal, registry)
                             if interaction:
-                                generation = microphone.reset_interaction(generation)
+                                generation = microphone.suspend_interaction(generation)
                             try:
                                 with measure('任务执行与反馈'):
                                     results = execute(proposal, registry, context, speak, checkpoint=checkpoint,
                                                       cleanup_checkpoint=cleanup_checkpoint)
-                            except CleanupUnconfirmed:
-                                raise
+                            except CleanupUnconfirmed as error:
+                                if not interaction:
+                                    raise
+                                generation = release_interaction(interaction, generation, recover=True)
+                                raise RuntimeError('独占技能异常，资源已恢复，请重新发出指令。') from error
                             except BaseException:
                                 if interaction:
                                     generation = release_interaction(interaction, generation)
@@ -258,26 +304,29 @@ def serve(registry, context, sdk_bridge='namespaced'):
                         check_cancel()
                         # execute 仅在清理完成后传播原异常；隔离检查仍须先于恢复播报。
                         registry.check_resources(context, {'speaker'})
+                        audio_output.ensure_idle()
                         context.cancelled.clear()
                         logger.error('TURN_NETWORK_ERROR %s', type(error).__name__)
                         history.clear()
                         pending_plan = None
                         microphone.idle(generation)
-                        ask(NETWORK_ERROR_PROMPT, generation)
+                        recover_prompt(NETWORK_ERROR_PROMPT, generation)
                     except Exception as error:
                         check_cancel()
+                        # execute 已等待本轮清理；先确认资源可用，再解除本轮取消，允许恢复播报。
+                        registry.check_resources(context, {'speaker'})
+                        audio_output.ensure_idle()
+                        context.cancelled.clear()
                         logger.error('TURN_ERROR %s', type(error).__name__)
                         if isinstance(error, AudioError):
                             logger.error('AUDIO_ERROR %s', str(error))
                         history.clear()
                         pending_plan = None
                         microphone.idle(generation)
-                        try:
-                            ask('本轮未能完整完成，执行结果请以实际状态为准。请重新告诉我你的要求。', generation)
-                        except ProviderNetworkError:
-                            ask(NETWORK_ERROR_PROMPT, generation)
+                        recover_prompt('本轮未能完整完成，执行结果请以实际状态为准。请重新告诉我你的要求。', generation)
                     logger.info('TURN_SECONDS %s', round(time.monotonic() - turn_started, 3))
-                    logger.info('VOICE_WINDOW_OPEN 30s · 等待原厂 VAD 音频')
+                    if microphone.phase == 'listening':
+                        logger.info('VOICE_WINDOW_OPEN 30s · 等待原厂 VAD 音频')
             finally:
                 context.cancelled.set()
                 try:

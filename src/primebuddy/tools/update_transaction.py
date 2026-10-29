@@ -61,7 +61,7 @@ def remove(path):
 def target_path(home, name):
     path = PurePosixPath(name)
     allowed = {'main.py', 'README.md', 'CHANGELOG.md', 'LICENSE', 'requirements.txt',
-               'release.json', 'src', 'resource', 'scripts', '_deps', 'bin/primebuddy', 'bin/env.sh',
+               'release.json', 'src', 'resource', 'scripts', 'docs', '_deps', 'bin/primebuddy', 'bin/env.sh',
                'cfg/config.example.yaml', 'cfg/providers.example.yaml', 'cfg/skill-adapters.example.yaml',
                'cfg/skills.yaml', 'cfg/config.yaml', 'cfg/providers.yaml'}
     if (name not in allowed and not (len(path.parts) == 2 and path.parts[0] == 'skills'

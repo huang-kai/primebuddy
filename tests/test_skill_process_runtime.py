@@ -309,6 +309,20 @@ class SkillProcessRuntimeTests(unittest.TestCase):
         self.assertEqual(self.executed(), ['abnormal', 'ok'])
         self.assertFalse((self.data / 'cleanup-unconfirmed.json').exists())
 
+    def test_exclusive_process_crash_recovers_before_next_task_runs(self):
+        self.registry.skills['media-fixture']['actions']['play']['interaction'] = 'exclusive'
+        announcements = []
+        first = execute(self.plan(self.task(mode='abnormal')), self.registry, self.context,
+                        announce=announcements.append)
+        self.assertEqual(first['first']['status'], 'failed')
+        self.assertTrue((self.data / 'recovered').exists())
+        self.assertFalse((self.data / 'busy').exists())
+        self.registry.skills['media-fixture']['actions']['play'].pop('interaction')
+        second = execute(self.plan(self.task('next')), self.registry,
+                         Context(runtime=self.context.runtime, simulate=False), announce=lambda _: None)
+        self.assertEqual(second['next']['status'], 'success')
+        self.assertEqual(self.executed(), ['abnormal', 'ok'])
+
     def test_unreleased_device_blocks_tts_dependencies_and_later_turn(self):
         announcements = []
         with self.assertRaises(CleanupUnconfirmed):

@@ -65,6 +65,16 @@ def load_skill_metadata(root):
         options = package.get('primebuddy', {})
         if not isinstance(options, dict):
             raise SetupError('primebuddy 可选适配须为键值对象。')
+        protocol = options.get('version')
+        if 'version' in options:
+            if type(protocol) is not int or protocol != 1:
+                raise SetupError('不支持的技能 CLI 协议版本；当前支持 version: 1。')
+            cli = options.get('cli')
+            if not isinstance(cli, dict) or not cli.get('configure'):
+                raise SetupError('协议 v1 技能必须提供 primebuddy.cli.configure 安装向导入口。')
+            # 在下载依赖或替换已有安装前检查脚本、路径和参数模板。
+            from primebuddy.skills.adapters import validate_command
+            validate_command(root, cli['configure'], set())
         mode = options.get('mode', 'task')
         if not isinstance(mode, str) or mode not in ('task', 'exclusive'):
             raise SetupError('primebuddy.mode 仅支持 task 或 exclusive。')
@@ -75,7 +85,7 @@ def load_skill_metadata(root):
                 raise SetupError('primebuddy.cli 不能与旧原生入口或配置声明混用。')
         if type(options.get('api_version', 1)) is not int or options.get('api_version', 1) != 1:
             raise SetupError('不支持的 PrimeBuddy 原生工具适配版本。')
-        data = dict(options, name=frontmatter['name'], description=frontmatter['description'],
+        data = dict(options, cli_version=protocol, name=frontmatter['name'], description=frontmatter['description'],
                     version=version, mode=mode, instructions=instructions, document=document, package=package)
         for field in ('entrypoint', 'setup'):
             if field in data:

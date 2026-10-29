@@ -4,6 +4,13 @@
 
 ## Unreleased
 
+- README 改为快速上手与文档导航，分类说明迁入随安装包分发的 docs，补充 only_voice 音频流程及设计原因。
+- 技能协议字段统一为 primebuddy.version: 1；随包清单与兼容清单分离，默认大包只包含点歌台和成语接龙。
+
+- 完整发行纳入成语接龙，提供 --skills-dir 按清单组合打包；向导默认不勾选技能，支持仅安装平台。
+- 新增 CLI 协议 v1 及强制 configure 入口校验，官方技能自带完整 CLI 声明，旧包继续兼容。
+- 平台升级保留仍兼容的技能版本，不再强制追随推荐版本；不兼容技能沿用事务性更新与回滚。
+
 ### Features
 
 - **技能自声明运行模式**：技能在自己的 `cfg/pkg.yaml` 中配置 `primebuddy.mode`（默认 `task`，独占为 `exclusive`）和 `primebuddy.cli` 命令，新增应用无需在 Buddy 中注册技能名；宿主覆盖命令时仍保留技能声明的独占模式。

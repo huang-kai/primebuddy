@@ -94,8 +94,8 @@ def onboard(ui):
         else:
             suffix = ' · 官方随包'
         labels.append(name + suffix)
-    defaults = [i for i, name in enumerate(names) if name in updates or name not in index or not index[name]['ready']]
-    chosen = ui.multiselect('选择本次要安装或配置的技能', labels, default=defaults) if names else []
+    ui.info('技能均为可选。可以全不选，仅安装平台；未选中的已有技能保持原样。')
+    chosen = ui.multiselect('选择本次要安装或配置的技能（可全不选）', labels, default=[]) if names else []
     for position in chosen:
         name = names[position]
         ui.header(name + ' · 配置引导')

@@ -52,7 +52,7 @@ class NativeVoiceInput:
             self.error = AudioError('原厂语音事件积压，技能将退出。')
 
     def listen(self, generation, *, reset_deadline=True):
-        if self.current(generation):
+        if self.current(generation) and self.phase != 'exclusive':
             now = time.monotonic()
             if not reset_deadline and now >= self.deadline:
                 self.timeout('未识别到有效语音，等待原厂重新开放监听。')
@@ -68,7 +68,7 @@ class NativeVoiceInput:
 
     def monitor_interrupt(self, generation):
         """暂存完整语句；调用方必须已有明确的取消来源，不能把 VAD 当作唤醒。"""
-        if self.current(generation):
+        if self.current(generation) and self.phase != 'exclusive':
             self.phase = 'interrupt'
             self.buffer = None
             self.opened_at_ns = self.robot.node.get_clock().now().nanoseconds
@@ -90,7 +90,7 @@ class NativeVoiceInput:
 
     def begin_interrupt(self, generation):
         """旧轮失效，收音继续暂存，等待旧任务确认完成业务清理。"""
-        if not self.current(generation):
+        if not self.current(generation) or self.phase == 'exclusive':
             return None
         self.generation += 1
         trace('interrupt_pending', generation=self.generation)
@@ -98,7 +98,7 @@ class NativeVoiceInput:
 
     def resume_after_interrupt(self, generation):
         """清理确认后开窗，保留已开始或已完整到达的下一句话。"""
-        if not self.current(generation):
+        if not self.current(generation) or self.phase == 'exclusive':
             return None
         self.phase = 'listening'
         self.deadline = time.monotonic() + 30
@@ -113,7 +113,7 @@ class NativeVoiceInput:
         return self.generation
 
     def idle(self, generation):
-        if self.current(generation):
+        if self.current(generation) and self.phase != 'exclusive':
             self.phase = 'muted'
             self.buffer = None
 
@@ -121,7 +121,8 @@ class NativeVoiceInput:
         """独占应用交接边界：废弃旧回调、残句及事件，保持静音直到宿主恢复监听。"""
         if not self.current(generation):
             return self.generation
-        self.idle(generation)
+        self.phase = 'muted'
+        self.buffer = None
         self.generation += 1
         self.deadline = self.started_at = self.last_packet_at = 0
         self.wait_for_new_listening = False
@@ -134,8 +135,17 @@ class NativeVoiceInput:
         trace('interaction_reset', generation=self.generation)
         return self.generation
 
+    def suspend_interaction(self, generation):
+        """独占子进程接管语音；宿主不分句、不积压语音，也不以收音健康状态取消游戏。"""
+        if not self.current(generation):
+            return self.generation
+        generation = self.reset_interaction(generation)
+        self.phase = 'exclusive'
+        trace('interaction_suspended', generation=generation)
+        return generation
+
     def wait_for_listening(self, generation):
-        if self.current(generation):
+        if self.current(generation) and self.phase != 'exclusive':
             self.phase = 'waiting'
             self.buffer = None
             if self.conversation_state == 1 and not self.wait_for_new_listening:
@@ -147,6 +157,9 @@ class NativeVoiceInput:
             return
         state = int(msg.main_state.value)
         previous, self.conversation_state = self.conversation_state, state
+        if self.phase == 'exclusive':
+            # 仅保留最新状态供交还后使用；不产生业务事件或重开宿主收音窗。
+            return
         if state != previous:
             trace('native_state', previous=previous, state=state, phase=self.phase)
         if self.phase == 'listening' and state == 3:
@@ -160,7 +173,7 @@ class NativeVoiceInput:
             self.listen(self.generation)
 
     def on_audio(self, msg):
-        if self.closed.is_set() or self.error is not None:
+        if self.closed.is_set() or self.error is not None or self.phase == 'exclusive':
             return
         try:
             if self.phase in ('listening', 'interrupt'):
@@ -246,6 +259,8 @@ class NativeVoiceInput:
         self.emit('timeout', reason)
 
     def check_health(self):
+        if self.phase == 'exclusive':
+            return
         now = time.monotonic()
         if self.phase == 'listening':
             if self.buffer is not None:

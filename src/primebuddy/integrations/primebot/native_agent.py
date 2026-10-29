@@ -91,13 +91,26 @@ def agent_mode(runtime, value=None):
     if value is not None:
         command += ' ' + shlex.quote(value)
     result = subprocess.run(host_command(runtime, command, ros=True),
-                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=75)
-    if result.returncode:
-        raise AudioError('原厂 Agent 模式调用失败；请核对恢复记录。')
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
     try:
-        return json.loads(result.stdout)['mode']
-    except (ValueError, KeyError):
+        data = json.loads(result.stdout)
+    except (ValueError, TypeError):
+        data = None
+    if result.returncode:
+        detail = data.get('error') if isinstance(data, dict) else None
+        if isinstance(detail, dict):
+            logger.error('AGENT_MODE_RPC_ERROR operation=%s service=%s reason=%s',
+                         value or 'read', detail.get('service'), detail.get('reason'))
+        else:
+            logger.error('AGENT_MODE_RPC_ERROR operation=%s returncode=%s stderr=%s',
+                         value or 'read', result.returncode,
+                         result.stderr.decode('utf-8', errors='replace')[-2000:].strip())
+        raise AudioError('原厂 Agent 模式调用失败；请核对恢复记录。')
+    if not isinstance(data, dict) or data.get('mode') not in ('normal', 'only_voice'):
         raise AudioError('原厂 Agent 模式响应格式无效。') from None
+    if data.get('write_response_timeout'):
+        logger.warning('AGENT_MODE_WRITE_RESPONSE_TIMEOUT_CONFIRMED mode=%s', data['mode'])
+    return data['mode']
 
 
 def confirmed_mode(runtime, expected):

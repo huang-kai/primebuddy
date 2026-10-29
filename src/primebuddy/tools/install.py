@@ -89,6 +89,8 @@ def stage_application(source, stage):
              'cfg/config.example.yaml', 'cfg/providers.example.yaml', 'cfg/skill-adapters.example.yaml']
     if (source / 'LICENSE').exists():
         names.append('LICENSE')
+    if (source / 'docs').is_dir():
+        names.append('docs')
     for name in names:
         path, target = source / name, stage / name
         if path.is_symlink() or (path.is_dir() and any(item.is_symlink() for item in path.rglob('*'))):

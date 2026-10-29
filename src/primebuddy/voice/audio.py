@@ -117,6 +117,17 @@ class AudioOutput:
             self.media = NativeMedia(self.robot)
         return self.media
 
+    def ensure_idle(self):
+        """恢复监听前只读核验；未确认结束的自有播放不能被忽略。"""
+        from primebuddy.core.engine import CleanupUnconfirmed
+        if not self.lock.acquire(blocking=False):
+            raise CleanupUnconfirmed('宿主播报仍在运行，未恢复监听。')
+        try:
+            if self.closed or self.media is not None and self.media.submitted:
+                raise CleanupUnconfirmed('宿主音频释放未确认，未恢复监听。')
+        finally:
+            self.lock.release()
+
     def close(self):
         # serve 在任务线程退出之后关闭；清理不能被全局取消标志跳过。
         with self.lock:

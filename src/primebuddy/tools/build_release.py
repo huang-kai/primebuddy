@@ -49,7 +49,7 @@ def framework_zip(output, bundles, manifest=None):
         archive.write(ROOT / 'CHANGELOG.md', 'primebuddy/CHANGELOG.md')
         for name in ('config.example.yaml', 'providers.example.yaml', 'skill-adapters.example.yaml'):
             archive.write(ROOT / 'cfg' / name, 'primebuddy/cfg/' + name)
-        for name in ('src', 'resource', 'scripts'):
+        for name in ('src', 'resource', 'scripts', 'docs'):
             # 随包技能由本次打包生成，不带入旧安装目录中的重复版本。
             add_tree(archive, ROOT / name, 'primebuddy/' + name, exclude=('bundled',) if name == 'resource' else ())
         for path in bundles:
@@ -100,6 +100,8 @@ def build_releases(output_dir, skills, framework=True, overwrite=False, release=
         if {data['name'] for data in metadata} != set(manifest['skills']):
             raise ValueError('完整发行须通过 --skill 提供清单中的全部官方技能，且不能附加其他技能。')
         for data in metadata:
+            if data.get('cli_version') != 1:
+                raise ValueError('正式发行技能必须声明 version: 1 和包内 configure 向导：' + data['name'])
             if data['version'] != manifest['skills'][data['name']]['recommended_version']:
                 raise ValueError('官方技能版本与发行清单推荐版本不一致：' + data['name'])
         notes = release_notes(manifest)
@@ -131,7 +133,11 @@ def build_releases(output_dir, skills, framework=True, overwrite=False, release=
             manifest.pop('framework', None)
             path = stage / f'primebuddy-{__version__}.rpk'
             zipped = path.with_suffix('.zip')
-            framework_zip(zipped, bundles, manifest)
+            # 正式发行的兼容目录可包含另行下载的技能，不等于预装候选列表。
+            included = set(manifest.get('bundled_skills', manifest['skills'])) if release else None
+            framework_bundles = [bundle for bundle, data in zip(bundles, metadata)
+                                 if included is None or data['name'] in included]
+            framework_zip(zipped, framework_bundles, manifest)
             zipped.rename(path)
         if release:
             manifest['framework'] = artifact(path, manifest['version'])
@@ -153,9 +159,14 @@ def main():
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'dist', help='输出目录，默认框架 dist；文件名自动生成')
     parser.add_argument('--framework', action='store_true', help='打包框架；只有指定 --skill 时才附带技能')
     parser.add_argument('--skill', type=Path, action='append', help='打包指定技能源码目录，可重复；与 --framework 同用时放入框架包')
+    parser.add_argument('--skills-dir', type=Path, help='完整发行的技能源码根目录；按 release.json 收集全部官方技能，与 --skill 互斥')
     parser.add_argument('--overwrite', action='store_true', help='替换输出目录中已有的同版本 RPK')
     parser.add_argument('--release', action='store_true', help='生成完整发行：要求框架和清单推荐的全部官方技能，并输出清单、校验值和更新说明')
     args = parser.parse_args()
+    if args.skills_dir and (not args.release or args.skill):
+        parser.error('--skills-dir 须与 --release 一起使用，且不能与 --skill 混用')
+    if args.skills_dir:
+        args.skill = [args.skills_dir / name for name in load_release(ROOT / 'release.json')['skills']]
     if not args.framework and not args.skill and not args.release:
         parser.print_help()
         return

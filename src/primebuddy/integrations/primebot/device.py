@@ -38,9 +38,21 @@ def host_command(runtime, command, *, ros=False):
         setups = ['/robot/software/app_proxy/bin/setup.bash', '/robot/software/housekeeper/bin/setup.bash']
         if detect_device().series == 'Q1':
             setups.reverse()
-        command = ('source /robot/etc/basic_env >/dev/null 2>&1 && '
+        environment = ('source /robot/etc/basic_env >/dev/null 2>&1 && '
                    'for setup in ' + ' '.join(setups) + '; '
-                   'do if test -f "$setup"; then source "$setup" >/dev/null 2>&1; break; fi; done; ' + command)
+                   'do if test -f "$setup"; then source "$setup" >/dev/null 2>&1 || exit $?; break; fi; done; ')
+        if detect_device().series == 'Q1':
+            environment += (
+                'sdk_prefix=/robot/software/interface/aimdk_msgs; '
+                'if test -d "$sdk_prefix"; then '
+                'sdk_python="$sdk_prefix/local/lib/python3.10/dist-packages"; '
+                'test -d "$sdk_python/aimdk_msgs" && '
+                'test -r "$sdk_prefix/lib/libaimdk_msgs__rosidl_typesupport_c.so" || '
+                '{ echo "Q1 interface SDK incomplete; refusing mixed libraries" >&2; exit 1; }; '
+                'export PYTHONPATH="$sdk_python${PYTHONPATH:+:$PYTHONPATH}"; '
+                'export LD_LIBRARY_PATH="$sdk_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; '
+                'export AMENT_PREFIX_PATH="$sdk_prefix${AMENT_PREFIX_PATH:+:$AMENT_PREFIX_PATH}"; fi; ')
+        command = environment + command
     if audio_host() == 'local':
         return ['bash', '-c', command]
     from .robot_audio import ssh_options

@@ -24,18 +24,20 @@ class ReleaseManifestTests(unittest.TestCase):
         (self.source / 'release.json').write_bytes((ROOT / 'release.json').read_bytes())
         (self.source / 'CHANGELOG.md').write_text('# 更新日志\n\n## [1.1.0] - 2026-10-23\n\n本次更新。\n\n## 1.0.0\n\n旧版本。\n')
         self.skills = []
-        for name, version in [('diangetai', '0.4.0'), ('yeelight', '0.3.0')]:
+        for name, version in [('diangetai', '0.4.0'), ('yeelight', '0.3.0'), ('chengyu-chain', '0.1.0')]:
             skill = self.root / name
             (skill / 'cfg').mkdir(parents=True)
             (skill / 'SKILL.md').write_text('---\nname: ' + name + '\ndescription: 测试\n---\n测试。')
-            (skill / 'cfg/pkg.yaml').write_text(json.dumps({'version': version}))
+            (skill / 'main.py').write_text('')
+            (skill / 'cfg/pkg.yaml').write_text(json.dumps({'version': version, 'primebuddy': {
+                'version': 1, 'cli': {'configure': ['main.py', 'configure']}}}))
             self.skills.append(skill)
 
     def test_complete_release_has_verified_assets_and_matching_embedded_manifest(self):
         with patch.object(builder, 'ROOT', self.source):
             paths = builder.build_releases(self.root / 'output', self.skills, release=True)
         self.assertEqual({path.name for path in paths}, {
-            'primebuddy-1.1.0.rpk', 'diangetai-0.4.0.rpk', 'yeelight-0.3.0.rpk', 'release.json', 'release-notes.md'})
+            'primebuddy-1.1.0.rpk', 'diangetai-0.4.0.rpk', 'yeelight-0.3.0.rpk', 'chengyu-chain-0.1.0.rpk', 'release.json', 'release-notes.md'})
         output = self.root / 'output'
         manifest = load_release(output / 'release.json')
         self.assertEqual(manifest['framework']['sha256'], hashlib.sha256((output / 'primebuddy-1.1.0.rpk').read_bytes()).hexdigest())
@@ -44,12 +46,17 @@ class ReleaseManifestTests(unittest.TestCase):
             self.assertNotIn('framework', embedded)
             self.assertEqual(embedded, {key: value for key, value in manifest.items() if key != 'framework'})
             self.assertIn('primebuddy/CHANGELOG.md', archive.namelist())
+            self.assertIn('primebuddy/docs/audio-flow.md', archive.namelist())
             self.assertNotIn('primebuddy/changelog.md', archive.namelist())
             for rule in manifest['skills'].values():
                 artifact = rule['artifact']
                 content = (output / artifact['filename']).read_bytes()
                 self.assertEqual(artifact['sha256'], hashlib.sha256(content).hexdigest())
-                self.assertEqual(archive.read('primebuddy/resource/bundled/' + artifact['filename']), content)
+                member = 'primebuddy/resource/bundled/' + artifact['filename']
+                if artifact['filename'].startswith('yeelight-'):
+                    self.assertNotIn(member, archive.namelist())
+                else:
+                    self.assertEqual(archive.read(member), content)
                 self.assertEqual(artifact['url'], 'https://github.com/huang-kai/primebuddy/releases/download/v1.1.0/' + artifact['filename'])
         notes = (output / 'release-notes.md').read_text()
         self.assertIn('本次更新。', notes)
@@ -84,9 +91,18 @@ class ReleaseManifestTests(unittest.TestCase):
             for skills, framework in [(self.skills, False), (self.skills[:1], True)]:
                 with self.assertRaises(ValueError):
                     builder.build_releases(self.root / 'output', skills, framework=framework, release=True)
-            (self.skills[0] / 'cfg/pkg.yaml').write_text('{"version":"0.4.1"}')
+            path = self.skills[0] / 'cfg/pkg.yaml'
+            metadata = json.loads(path.read_text())
+            metadata['version'] = '0.4.1'
+            path.write_text(json.dumps(metadata))
             with self.assertRaises(ValueError):
                 builder.build_releases(self.root / 'output', self.skills, release=True)
+        self.assertFalse((self.root / 'output').exists())
+
+    def test_official_release_requires_wizard_protocol(self):
+        (self.skills[0] / 'cfg/pkg.yaml').write_text('{"version":"0.4.0"}')
+        with patch.object(builder, 'ROOT', self.source), self.assertRaisesRegex(ValueError, 'version'):
+            builder.build_releases(self.root / 'output', self.skills, release=True)
         self.assertFalse((self.root / 'output').exists())
 
     def test_missing_changelog_section_does_not_replace_existing_release(self):
