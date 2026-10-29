@@ -5,7 +5,7 @@
 把技能的 RPK 上传到机器上，在包所在目录执行：
 
 ```bash
-primebuddy skill install ./diangetai-0.4.0.rpk
+primebuddy skill install ./diangetai-0.4.1.rpk
 ```
 
 也可以安装本地的单个技能源码目录：
@@ -21,7 +21,7 @@ RPK 使用 ZIP 格式，旧 ZIP 包也支持；还可以传入 HTTPS 包下载�
 需要以后再配置时：
 
 ```bash
-primebuddy skill install ./diangetai-0.4.0.rpk --no-configure
+primebuddy skill install ./diangetai-0.4.1.rpk --no-configure
 primebuddy skill configure diangetai
 ```
 
@@ -29,7 +29,7 @@ primebuddy skill configure diangetai
 
 ```bash
 # 更新已有技能
-primebuddy skill install ./diangetai-0.4.0.rpk --replace
+primebuddy skill install ./diangetai-0.4.1.rpk --replace
 
 # 重新配置
 primebuddy skill configure diangetai

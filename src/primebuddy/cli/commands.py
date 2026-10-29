@@ -125,12 +125,19 @@ def manage_skill(args):
         if not index:
             print('尚未安装技能。使用 primebuddy skill install <RPK、ZIP 或 Git 地址>。')
         for name, record in sorted(index.items()):
-            metadata = skills.load_skill_metadata(record['root'])
-            missing = Registry.missing_requirements(metadata)
             state = '待配置' if not record['ready'] else ('已启用' if record['enabled'] else '已停用')
-            if missing:
-                state += ' · 缺少前置要求：' + '、'.join(missing)
-            print(f"{name}  {record['version']}  {state}\n  目录：{record['root']}")
+            try:
+                if record.get('error'):
+                    raise SetupError(record['error'])
+                from primebuddy.skills.adapters import adapt_metadata
+                metadata = adapt_metadata(skills.load_skill_metadata(record['root']), record['root'])
+                skills.skill_config(name)
+                missing = Registry.missing_requirements(metadata)
+                if missing:
+                    state += ' · 缺少前置要求：' + '、'.join(missing)
+            except (SetupError, OSError) as error:
+                state = '已隔离 · ' + str(error)
+            print(f"{name}  {record['version']}  {state}\n  目录：{record.get('root', '安装记录路径无效')}")
     elif args.action == 'catalog':
         print(json.dumps(Registry().catalog(), ensure_ascii=False, indent=2))
     elif args.action == 'install':

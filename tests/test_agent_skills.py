@@ -105,8 +105,9 @@ class AgentSkillTests(unittest.TestCase):
         write_config(config_path('config.yaml'), {'skills': {'directories': [str(source.parent)]}})
         self.assertEqual(Registry().skills['hello']['root'], source.resolve())
         create_skill(self.home / 'skills/hello')
-        with self.assertRaisesRegex(SetupError, '重复'):
-            Registry()
+        registry = Registry()
+        self.assertEqual(registry.catalog(), [])
+        self.assertIn('重复', registry.unavailable['hello']['reason'])
 
     def test_metadata_and_file_paths_reject_invalid_documents_without_imports(self):
         source = create_skill(self.root / 'hello')

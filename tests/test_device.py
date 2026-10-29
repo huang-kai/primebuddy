@@ -57,13 +57,14 @@ class DeviceTests(unittest.TestCase):
         with patch.dict('os.environ', {'PRIMEBOT_AUDIO_HOST': 'run@robot.example'}):
             self.assertEqual(device.audio_host(), 'run@robot.example')
 
-    def test_mode_rpc_prefers_each_models_installed_sdk_environment(self):
-        for series, preferred in [('T1', 'app_proxy'), ('Q1', 'housekeeper')]:
+    def test_mode_rpc_uses_standard_sdk_for_both_models(self):
+        for series in ('T1', 'Q1'):
             with patch.object(device, 'detect_device', return_value=device.Device(series, series, '0')), \
                     patch.object(device, 'audio_host', return_value='local'):
                 command = device.host_command(Path('/tmp'), 'python3 -c pass', ros=True)[-1]
-                other = 'housekeeper' if preferred == 'app_proxy' else 'app_proxy'
-                self.assertLess(command.index(preferred), command.index(other))
+                self.assertIn('/robot/software/interface/aimdk_msgs', command)
+                self.assertNotIn('/housekeeper/', command)
+                self.assertNotIn('/app_proxy/', command)
 
 
 class AgentBackendTests(unittest.TestCase):

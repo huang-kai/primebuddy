@@ -830,6 +830,40 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(ui.multiselect.call_args.kwargs['default'], [])
         self.assertIn('更新至 0.2.10', ui.multiselect.call_args.args[1][0])
 
+    def test_explicit_install_later_skips_bundles_and_existing_skill_configuration(self):
+        from unittest.mock import Mock
+        from primebuddy.cli.onboarding import onboard
+        ui = Mock()
+        ui.confirm.return_value = False
+        ui.multiselect.return_value = [2]
+        bundles = {'hello': {'path': Path('hello.zip'), 'version': '0.1.0'}}
+        with patch('primebuddy.cli.onboarding.bundled_skills', return_value=bundles), \
+                patch('primebuddy.cli.onboarding.load_skill_records', return_value={'old': {'ready': True}}), \
+                patch('primebuddy.cli.onboarding.install') as install, \
+                patch('primebuddy.cli.onboarding.configure') as configure:
+            onboard(ui)
+        self.assertEqual(ui.multiselect.call_args.args[1][-1], 'None')
+        install.assert_not_called()
+        configure.assert_not_called()
+        self.assertIn('以后运行 primebuddy onboard 可继续', str(ui.info.call_args_list))
+
+    def test_install_later_conflict_is_resolved_before_any_skill_installation(self):
+        from unittest.mock import Mock
+        from primebuddy.cli.onboarding import onboard
+        ui = Mock()
+        ui.confirm.return_value = False
+        ui.multiselect.side_effect = [[0, 1], [0]]
+        bundles = {'hello': {'path': Path('hello.zip'), 'version': '0.1.0'}}
+        with patch('primebuddy.cli.onboarding.bundled_skills', return_value=bundles), \
+                patch('primebuddy.cli.onboarding.load_skill_records', return_value={}), \
+                patch('primebuddy.cli.onboarding.install', return_value={'ready': True}) as install, \
+                patch('primebuddy.cli.onboarding.configure') as configure:
+            onboard(ui)
+        self.assertEqual(ui.multiselect.call_count, 2)
+        self.assertIn('不能与具体技能同时选择', str(ui.info.call_args_list))
+        install.assert_called_once_with('hello.zip', ui, replace=False)
+        configure.assert_not_called()
+
     def test_bundle_does_not_downgrade_newer_installed_skill(self):
         from unittest.mock import Mock
         from primebuddy.cli.onboarding import onboard

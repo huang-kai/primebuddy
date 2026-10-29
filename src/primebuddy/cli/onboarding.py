@@ -77,10 +77,15 @@ def onboard(ui):
     ui.header('2 / 2 · 安装与配置技能', '技能自行提供配置步骤，使用相同的交互界面')
     index = load_skill_records()
     actual = discover_skill_records()
+    blocked = {name for name, record in actual.items() if record.get('error')}
+    for name in sorted(blocked):
+        ui.info('技能 ' + name + ' 已隔离：' + actual[name]['error']
+                + '。保留原配置；修复后可再次运行向导，其他技能可继续配置。')
+    index = {name: record for name, record in index.items() if name not in blocked}
     for name, record in index.items():
         if name in actual:
             record['version'] = actual[name]['version']
-    bundles = bundled_skills()
+    bundles = {name: record for name, record in bundled_skills().items() if name not in blocked}
     updates = {name for name in bundles if name in index
                and tuple(map(int, bundles[name]['version'].split('.')))
                > tuple(map(int, index[name]['version'].split('.')))}
@@ -90,12 +95,25 @@ def onboard(ui):
         if name in updates:
             suffix = ' · 更新至 ' + bundles[name]['version']
         elif name in index:
-            suffix = ' · 重新配置' if index[name]['ready'] else ' · 继续配置'
+            suffix = ' · 重新配置' if index[name].get('ready', False) else ' · 继续配置'
         else:
             suffix = ' · 官方随包'
         labels.append(name + suffix)
-    ui.info('技能均为可选。可以全不选，仅安装平台；未选中的已有技能保持原样。')
-    chosen = ui.multiselect('选择本次要安装或配置的技能（可全不选）', labels, default=[]) if names else []
+    ui.info('技能均为可选，可多选；回车确认后，按列表顺序逐个进入所选技能的向导。选择“None”或全不选可跳过，已有技能保持原样。')
+    chosen = []
+    if names:
+        skip = len(names)
+        choices = [*labels, 'None']
+        while True:
+            chosen = ui.multiselect('选择本次要安装或配置的技能（可多选）', choices, default=[])
+            if skip not in chosen:
+                break
+            if len(chosen) == 1:
+                chosen = []
+                break
+            ui.info('“None”不能与具体技能同时选择，请重新选择。')
+    if not chosen:
+        ui.info('本次跳过技能安装和配置，已有技能保持原样；以后运行 primebuddy onboard 可继续。')
     for position in chosen:
         name = names[position]
         ui.header(name + ' · 配置引导')

@@ -104,7 +104,7 @@ def installed_version(home):
 
 def skill_updates(home, manifest):
     updates = []
-    for name, record in discover_skill_records(read_only=True).items():
+    for name, record in discover_skill_records(read_only=True, strict=True).items():
         spec = manifest['skills'].get(name)
         if spec is None:
             continue

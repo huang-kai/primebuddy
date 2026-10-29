@@ -13,8 +13,9 @@
 | 使用 | [技能管理](skill-management.md) | 安装、替换、配置、启用、禁用、删除 |
 | 开发 | [技能运行协议](skill-protocol.md) | SKILL.md、CLI、task/exclusive、进程生命周期和资源 |
 | 开发 | [安装向导协议](installation-protocol.md) | primebuddy.version、configure、路径和退出码 |
-| 维护 | [升级与兼容](upgrades.md) | 独立升级、失败恢复、不兼容技能的当前处理和后续方案 |
+| 维护 | [升级与兼容](upgrades.md) | 独立升级、失败恢复、坏包与不兼容技能隔离 |
 | 维护 | [打包发布](packaging.md) | 组合包、独立包、随包清单、正式发行要求 |
+| 维护 | [1.2.0 发布验收](release-validation.md) | 自动化、最终包安装验证、实机通过项与未验收范围 |
 | 贡献 | [贡献指南](contributing.md) | 开发环境、测试、PR、日志与许可 |
 
 建议阅读顺序：使用者阅读首页 → 安装部署 → 命令与配置；技能作者阅读架构 → 安装向导协议 → 技能运行协议 → 打包发布。音频接管和机器人问题先阅读音频流程。

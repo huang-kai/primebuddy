@@ -9,9 +9,11 @@ PrimeBuddy 是面向启元 T1 / Q1 的语音技能平台：用户说出请求，
 | 点歌台 `diangetai` | QQ 音乐登录、搜歌与播放，可配置动作、表情和灯光联动 |
 | 成语接龙 `chengyu-chain` | 独占式语音游戏，自己处理答题、解释和退出，结束后交回 Buddy |
 
-安装向导默认不选技能，可以单选、多选或只安装平台。易来等其他技能可另行安装，不属于默认随包内容。当前源码新增功能见 [Unreleased 更新记录](CHANGELOG.md)，打包验证通过不代表真人语音或全部型号验收完成。
+安装向导默认不选技能，空格可勾选多个，回车后依次进入各技能自己的安装和配置向导；选择 `None` 可跳过技能安装，之后运行 `primebuddy onboard` 可补装。易来等其他技能可另行安装，不属于默认随包内容。当前版本为 **1.2.0**，变更见 [更新记录](CHANGELOG.md)，打包验证通过不代表真人语音或全部型号验收完成。
 
 ## 快速部署
+
+1.2.0 准备两种安装包：`primebuddy-1.2.0.rpk` 是含上述两项技能的完整包，`primebuddy-1.2.0-core.rpk` 是不附带技能的纯平台包。两者安装步骤相同，详见[打包与产物说明](docs/packaging.md)。
 
 在机器人上使用系统 Python 3.10+、原厂 ROS 2 和设备随附的消息包；准备网络及模型服务 API Key。详细板型选择与 SSH 说明见[安装部署](docs/installation.md)。
 
@@ -67,6 +69,7 @@ primebuddy update                     # 更新平台，保留兼容的技能版�
 | 自定义安装向导、入口、返回值与版本 | [安装向导协议](docs/installation-protocol.md) |
 | 平台升级、兼容性、失败恢复及不兼容方案 | [升级与兼容](docs/upgrades.md) |
 | 大包、独立包、部署与 Release 产物 | [打包发布](docs/packaging.md) |
+| 当前版本已验证什么、还缺什么 | [发布验收记录](docs/release-validation.md) |
 | 开发环境、测试与提交规范 | [贡献指南](docs/contributing.md) |
 
 完整阅读路径见 [docs 文档目录](docs/README.md)。

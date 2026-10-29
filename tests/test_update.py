@@ -215,10 +215,10 @@ class UpdateIntegrationTests(unittest.TestCase):
     def assert_upgraded(self):
         from primebuddy.config.storage import read_config
         from primebuddy.tools.update import installed_version
-        self.assertEqual(installed_version(self.home), '1.1.0')
+        self.assertEqual(installed_version(self.home), '1.2.0')
         index = read_config(self.home / 'cfg/skills.yaml')
-        self.assertEqual(index['diangetai']['version'], '0.4.0')
-        self.assertEqual(index['yeelight']['version'], '0.3.0')
+        self.assertEqual(index['diangetai']['version'], '0.4.1')
+        self.assertEqual(index['yeelight']['version'], '0.3.1')
         self.assertTrue(index['diangetai']['enabled'])
         self.assertFalse(index['yeelight']['enabled'])
         for name, content in self.private.items():
@@ -242,7 +242,7 @@ class UpdateIntegrationTests(unittest.TestCase):
         before = {str(p.relative_to(skill)): p.read_bytes() for p in skill.rglob('*') if p.is_file()}
         self.assertNotIn('diangetai', [item['name'] for item in update.skill_updates(self.home, self.manifest)])
         # Restore valid published manifest for the framework/embedded-manifest comparison.
-        self.manifest['skills']['diangetai']['recommended_version'] = '0.4.0'
+        self.manifest['skills']['diangetai']['recommended_version'] = '0.4.1'
         with patch.object(update, 'download_artifact', side_effect=self.download), \
                 patch('primebuddy.skills.manager.run_setup') as configure:
             update.run_update()
@@ -255,7 +255,7 @@ class UpdateIntegrationTests(unittest.TestCase):
     def test_old_install_bootstrap_uses_bundled_versions_in_one_transaction(self):
         from primebuddy.skills.manager import unpack
         from primebuddy.tools import install
-        unpack(self.release / 'primebuddy-1.1.0.rpk', self.root / 'unpacked')
+        unpack(self.release / 'primebuddy-1.2.0.rpk', self.root / 'unpacked')
         source = self.root / 'unpacked/primebuddy'
         # 易来不在默认大包内；离线升级该旧技能须另行提供其独立包。
         artifact = self.manifest['skills']['yeelight']['artifact']
@@ -281,7 +281,7 @@ class UpdateIntegrationTests(unittest.TestCase):
     def test_online_and_offline_upgrade_refuse_pending_runtime_recovery(self):
         from primebuddy.tools import update, install
         from primebuddy.skills.manager import unpack
-        unpack(self.release / 'primebuddy-1.1.0.rpk', self.root / 'unpacked')
+        unpack(self.release / 'primebuddy-1.2.0.rpk', self.root / 'unpacked')
         source = self.root / 'unpacked/primebuddy'
         marker = self.home / 'runtime/diangetai/cleanup-unconfirmed.json'
         marker.parent.mkdir(parents=True)

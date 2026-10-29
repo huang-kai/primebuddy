@@ -47,6 +47,8 @@ def validate_release(data):
                 _check_artifact(rule['artifact'], name + '-' + rule['recommended_version'] + '.rpk', data['version'])
         if 'framework' in data:
             _check_artifact(data['framework'], 'primebuddy-' + data['version'] + '.rpk', data['version'])
+        if 'framework_core' in data:
+            _check_artifact(data['framework_core'], 'primebuddy-' + data['version'] + '-core.rpk', data['version'])
         return data
     except (ValueError, KeyError, TypeError):
         raise SetupError('发行清单格式无效，请使用完整的发布包。') from None

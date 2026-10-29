@@ -1,5 +1,6 @@
 """按 SKILL.md 发现技能；按需读取说明、资源和原生工具。"""
 from copy import deepcopy
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -8,35 +9,51 @@ from primebuddy.config.storage import SetupError, skill_config
 from primebuddy.skills.metadata import MAX_DOCUMENT, load_skill_metadata, resolve_skill_file
 from primebuddy.skills.adapters import adapt_metadata, load_adapters
 
+logger = logging.getLogger(__name__)
+
 
 class Registry:
     def __init__(self, root=None):
-        self.skills, self.modules = {}, {}
+        self.skills, self.modules, self.unavailable = {}, {}, {}
         adapters = load_adapters()
         if root is None:
             from primebuddy.skills.manager import discover_skill_records
-            folders = [record['root'] for record in discover_skill_records().values()
-                       if record['ready'] and record['enabled']]
+            folders = []
+            for name, record in discover_skill_records().items():
+                if record.get('error'):
+                    self._isolate(name, record.get('root'), record['error'])
+                elif record['ready'] and record['enabled']:
+                    folders.append(record['root'])
         else:
             folders = sorted(Path(root).iterdir()) if Path(root).is_dir() else []
         for folder in folders:
             if not folder.is_dir() or not (folder / 'SKILL.md').is_file():
                 continue
-            data = adapt_metadata(load_skill_metadata(folder), folder, adapters)
-            name = data['name']
-            if name in self.skills:
-                raise SetupError('技能名重复：' + name)
-            if root is None and self.missing_requirements(data):
-                continue
-            # 脚本资源默认串行；原生工具沿用明确声明的资源。
-            actions = dict(data['actions'])
-            if 'script' in actions:
-                raise SetupError('script 为框架固定脚本动作，请为原生工具使用其他名称。')
-            # 已装宿主适配时只暴露受约束的动作，避免另走脚本入口改路径、绕资源锁。
-            if not data.get('adapter') and not data['actions']:
-                actions['script'] = {'parameters': {'path': {'type': 'string'}, 'arguments': {'type': 'array'}},
-                                     'resources': ['skill.scripts']}
-            self.skills[name] = dict(data, root=folder.resolve(), actions=actions)
+            name = folder.name
+            try:
+                data = load_skill_metadata(folder)
+                name = data['name']
+                data = adapt_metadata(data, folder, adapters)
+                if name in self.skills or name in self.unavailable:
+                    raise SetupError('技能名重复：' + name)
+                # 即使未声明配置前置要求，损坏的私有 YAML 也不能交给子进程。
+                skill_config(name)
+                if root is None and self.missing_requirements(data):
+                    continue
+                actions = dict(data['actions'])
+                if 'script' in actions:
+                    raise SetupError('script 为框架固定脚本动作，请为原生工具使用其他名称。')
+                if not data.get('adapter') and not data['actions']:
+                    actions['script'] = {'parameters': {'path': {'type': 'string'}, 'arguments': {'type': 'array'}},
+                                         'resources': ['skill.scripts']}
+                self.skills[name] = dict(data, root=folder.resolve(), actions=actions)
+            except (SetupError, OSError) as error:
+                self._isolate(name, folder, str(error))
+
+    def _isolate(self, name, root, reason):
+        self.skills.pop(name, None)
+        self.unavailable[name] = {'root': root, 'reason': reason}
+        logger.warning('技能 %s 已隔离，本次不加载：%s（目录：%s）。配置和数据已保留。', name, reason, root)
 
     @staticmethod
     def missing_requirements(skill):
@@ -64,16 +81,16 @@ class Registry:
         from primebuddy.core.engine import CleanupUnconfirmed
         result = {}
         for skill in ([name] if name else self.skills):
-            provider = getattr(self.load(skill), 'planning_context', None)
-            if callable(provider):
-                try:
+            try:
+                provider = getattr(self.load(skill), 'planning_context', None)
+                if callable(provider):
                     value = provider(context)
                     if value is not None:
                         result[skill] = value
-                except CleanupUnconfirmed:
-                    raise
-                except Exception:
-                    result[skill] = {'status': 'unavailable'}
+            except CleanupUnconfirmed:
+                raise
+            except Exception:
+                result[skill] = {'status': 'unavailable'}
         return result
 
     def load(self, name):

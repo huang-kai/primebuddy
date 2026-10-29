@@ -1,22 +1,25 @@
 {
   "schema_version": 1,
-  "version": "1.1.0",
-  "bundled_skills": ["diangetai", "chengyu-chain"],
+  "version": "1.2.0",
+  "bundled_skills": [
+    "diangetai",
+    "chengyu-chain"
+  ],
   "skills": {
     "chengyu-chain": {
       "min_version": "0.1.0",
-      "max_version": "0.2.0",
-      "recommended_version": "0.1.0"
+      "max_version": "0.3.0",
+      "recommended_version": "0.2.0"
     },
     "diangetai": {
       "min_version": "0.4.0",
       "max_version": "0.5.0",
-      "recommended_version": "0.4.0"
+      "recommended_version": "0.4.1"
     },
     "yeelight": {
       "min_version": "0.3.0",
       "max_version": "0.4.0",
-      "recommended_version": "0.3.0"
+      "recommended_version": "0.3.1"
     }
   }
 }

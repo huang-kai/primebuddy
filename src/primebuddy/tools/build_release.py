@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""生成项目名-版本号.rpk；内容为 ZIP，不收集私有数据和开发文档。"""
+"""生成 RPK（ZIP）；正式发行同时提供完整包、纯平台包与校验清单。"""
+from copy import deepcopy
 import argparse
 import hashlib
 import json
@@ -30,7 +31,7 @@ def add_tree(archive, source, prefix, exclude=()):
 def skill_zip(source, output):
     data = load_skill_metadata(source)
     with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
-        for name in ('main.py', 'README.md', 'SKILL.md', 'requirements.txt', 'LICENSE'):
+        for name in ('main.py', 'README.md', 'CHANGELOG.md', 'SKILL.md', 'requirements.txt', 'LICENSE'):
             if not (source / name).is_file():
                 continue
             archive.write(source / name, name)
@@ -106,9 +107,11 @@ def build_releases(output_dir, skills, framework=True, overwrite=False, release=
                 raise ValueError('官方技能版本与发行清单推荐版本不一致：' + data['name'])
         notes = release_notes(manifest)
     filenames = ([f'primebuddy-{__version__}.rpk'] if framework else [])
+    if release:
+        filenames.append(f'primebuddy-{__version__}-core.rpk')
     filenames += [data['name'] + '-' + data['version'] + '.rpk' for data in metadata]
     if release:
-        filenames += ['release.json', 'release-notes.md']
+        filenames += ['release.json', 'release-notes.md', 'SHA256SUMS']
     if len(set(filenames)) != len(filenames):
         raise ValueError('发布包名称重复')
     outputs = [output_dir / name for name in filenames]
@@ -131,6 +134,7 @@ def build_releases(output_dir, skills, framework=True, overwrite=False, release=
                 manifest['skills'][data['name']]['artifact'] = artifact(path, manifest['version'])
         if framework:
             manifest.pop('framework', None)
+            manifest.pop('framework_core', None)
             path = stage / f'primebuddy-{__version__}.rpk'
             zipped = path.with_suffix('.zip')
             # 正式发行的兼容目录可包含另行下载的技能，不等于预装候选列表。
@@ -140,9 +144,17 @@ def build_releases(output_dir, skills, framework=True, overwrite=False, release=
             framework_zip(zipped, framework_bundles, manifest)
             zipped.rename(path)
         if release:
+            core_path = stage / f'primebuddy-{__version__}-core.rpk'
+            core_manifest = deepcopy(manifest)
+            core_manifest['bundled_skills'] = []
+            framework_zip(core_path, [], core_manifest)
             manifest['framework'] = artifact(path, manifest['version'])
+            manifest['framework_core'] = artifact(core_path, manifest['version'])
             (stage / 'release.json').write_text(json_text(manifest), encoding='utf-8')
             (stage / 'release-notes.md').write_text(notes, encoding='utf-8')
+            checksums = ''.join(hashlib.sha256((stage / name).read_bytes()).hexdigest() + '  ' + name + '\n'
+                                for name in filenames if name != 'SHA256SUMS')
+            (stage / 'SHA256SUMS').write_text(checksums, encoding='utf-8')
         for path in outputs:
             if path.suffix != '.rpk':
                 continue
@@ -161,7 +173,7 @@ def main():
     parser.add_argument('--skill', type=Path, action='append', help='打包指定技能源码目录，可重复；与 --framework 同用时放入框架包')
     parser.add_argument('--skills-dir', type=Path, help='完整发行的技能源码根目录；按 release.json 收集全部官方技能，与 --skill 互斥')
     parser.add_argument('--overwrite', action='store_true', help='替换输出目录中已有的同版本 RPK')
-    parser.add_argument('--release', action='store_true', help='生成完整发行：要求框架和清单推荐的全部官方技能，并输出清单、校验值和更新说明')
+    parser.add_argument('--release', action='store_true', help='生成完整发行：完整包、纯平台 core 包、独立技能包、清单、SHA256SUMS 和更新说明；须提供清单推荐的全部技能')
     args = parser.parse_args()
     if args.skills_dir and (not args.release or args.skill):
         parser.error('--skills-dir 须与 --release 一起使用，且不能与 --skill 混用')

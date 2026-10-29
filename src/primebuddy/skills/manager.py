@@ -35,6 +35,8 @@ def installation_lock():
 def load_skill_records():
     index = read_config(config_path('skills.yaml'))
     for record in index.values():
+        if not isinstance(record, dict):
+            continue
         for key in ('source', 'type', 'ref', 'commit', 'sha256'):
             record.pop(key, None)
     return index
@@ -280,8 +282,8 @@ def get_skill_package_directory(record):
     return path
 
 
-def discover_skill_records(*, read_only=False):
-    """安装索引用于版本管理；直接复制的 skill 同样进入目录。"""
+def discover_skill_records(*, read_only=False, strict=False):
+    """逐包发现；错误仅标记该包，升级事务可显式要求严格校验。"""
     from primebuddy.config.storage import load_app_config, application_directory
     from primebuddy.skills.adapters import adapt_metadata
     home = get_data_directory()
@@ -301,14 +303,34 @@ def discover_skill_records(*, read_only=False):
         adapters.update(read_config(adapter_path if adapter_path.exists() else home / 'skill-adapters.yaml'))
     else:
         records, app = load_skill_records(), load_app_config()
-    index = {name: dict(record, root=get_skill_package_directory(record))
-             for name, record in records.items()
-             if 'directory' not in record or Path(record['directory']).expanduser().is_dir()}
-    for name, record in index.items():
-        data = load_skill_metadata(record['root'])
-        if data['name'] != name:
-            raise SetupError('技能安装记录与目录名称不一致：' + name)
-        record['version'] = data['version']
+    index, seen_roots = {}, set()
+
+    def failed(record, error):
+        if strict:
+            raise error
+        record['error'] = str(error)
+
+    for name, saved in records.items():
+        record = dict(saved) if isinstance(saved, dict) else {}
+        record.setdefault('version', '未知')
+        record.setdefault('ready', False)
+        record.setdefault('enabled', False)
+        index[name] = record
+        try:
+            skill_name(name)
+            if (not isinstance(saved, dict) or not isinstance(record.get('path', record.get('directory')), str)
+                    or any(not isinstance(record[key], str) or '\x00' in record[key]
+                           for key in ('path', 'directory') if key in record)
+                    or type(record['ready']) is not bool or type(record['enabled']) is not bool):
+                raise SetupError('技能安装记录格式无效：' + name)
+            record['root'] = get_skill_package_directory(record)
+            seen_roots.add(record['root'].resolve())
+            data = load_skill_metadata(record['root'])
+            if data['name'] != name:
+                raise SetupError('技能安装记录与目录名称不一致：' + name)
+            record['version'] = data['version']
+        except (SetupError, OSError) as error:
+            failed(record, error)
     settings = app.get('skills', {})
     if not isinstance(settings, dict):
         raise SetupError('skills 配置须为键值对象。')
@@ -323,19 +345,26 @@ def discover_skill_records(*, read_only=False):
         for folder in sorted(root.iterdir()):
             if folder.name.startswith('.') or not folder.is_dir() or not (folder / 'SKILL.md').is_file():
                 continue
-            data = adapt_metadata(load_skill_metadata(folder), folder, adapters, check_compatibility=False)
-            name = data['name']
-            if name in index:
-                if index[name]['root'].resolve() != folder.resolve():
-                    raise SetupError('技能名称重复，请移除重复目录：' + name)
+            if folder.resolve() in seen_roots:
                 continue
-            configured_path = (home / 'cfg/skills' / name / 'config.yaml' if read_only
-                               else config_path('config.yaml', skill=name))
-            configured = (not (data.get('setup') or data.get('configure'))
-                          or configured_path.is_file()
-                          or (read_only and (home / 'data' / name / 'config.yaml').is_file()))
-            index[name] = {'root': folder.resolve(), 'version': data['version'],
-                           'ready': configured, 'enabled': True}
+            record = {'root': folder.resolve(), 'version': '未知', 'ready': False, 'enabled': True}
+            name = folder.name
+            try:
+                data = load_skill_metadata(folder)
+                name, record['version'] = data['name'], data['version']
+                data = adapt_metadata(data, folder, adapters, check_compatibility=False)
+                configured_path = (home / 'cfg/skills' / name / 'config.yaml' if read_only
+                                   else config_path('config.yaml', skill=name))
+                record['ready'] = (not (data.get('setup') or data.get('configure'))
+                                   or configured_path.is_file()
+                                   or (read_only and (home / 'data' / name / 'config.yaml').is_file()))
+            except (SetupError, OSError) as error:
+                failed(record, error)
+            if name in index:
+                failed(index[name], SetupError('技能名称重复，请移除重复目录：' + name + '；' + str(folder)))
+            else:
+                index[name] = record
+            seen_roots.add(folder.resolve())
     return index
 
 
@@ -346,11 +375,13 @@ def configure(name, ui):
         discovered = discover_skill_records()
         if name not in discovered:
             raise SetupError('技能尚未安装：' + name)
+        if discovered[name].get('error'):
+            raise SetupError(discovered[name]['error'])
         root = discovered[name]['root']
         data = load_skill_metadata(root)
         check_skill(data)
         if name not in index:
-            index[name] = {key: value for key, value in discovered[name].items() if key != 'root'}
+            index[name] = {key: discovered[name][key] for key in ('version', 'ready', 'enabled')}
             index[name]['directory'] = str(root)
         # 配置期间先撤销就绪状态；中断不能保留虚假的成功标记。
         index[name].update(version=data['version'], ready=False, enabled=False)
@@ -369,15 +400,21 @@ def set_enabled(name, enabled):
         index = load_skill_records()
         discovered = discover_skill_records()
         if name not in index and name in discovered:
-            index[name] = {key: value for key, value in discovered[name].items() if key != 'root'}
+            index[name] = {key: discovered[name][key] for key in ('version', 'ready', 'enabled')}
             index[name]['directory'] = str(discovered[name]['root'])
         if name not in index:
             raise SetupError('技能尚未安装：' + name)
         if enabled:
+            if discovered[name].get('error'):
+                raise SetupError(discovered[name]['error'])
             data = load_skill_metadata(discovered[name]['root'])
-            check_skill(data)
+            from primebuddy.skills.adapters import adapt_metadata
+            adapt_metadata(data, discovered[name]['root'])
+            skill_config(name)
             index[name]['version'] = data['version']
-        if enabled and not index[name]['ready']:
+        if not isinstance(index[name], dict):
+            raise SetupError('技能安装记录格式无效：' + name + '；该技能已隔离，请修复安装记录。')
+        if enabled and not index[name].get('ready', False):
             raise SetupError('技能尚未配置完成，请先运行 primebuddy skill configure ' + name)
         index[name]['enabled'] = enabled
         write_config(config_path('skills.yaml'), index)

@@ -54,8 +54,9 @@ class CompatibilityTests(unittest.TestCase):
         root = make_official(self.root / 'home/skills/diangetai')
         write_config(config_path('skills.yaml'), {'diangetai': {
             'path': 'diangetai', 'version': '0.4.0', 'ready': True, 'enabled': True}})
-        with self.assertRaisesRegex(SetupError, 'diangetai'):
-            Registry()
+        registry = Registry()
+        self.assertEqual(registry.catalog(), [])
+        self.assertIn('不兼容', registry.unavailable['diangetai']['reason'])
         source = make_official(self.root / 'source')
         with patch.object(manager, 'install_dependencies') as dependencies, \
                 patch.object(manager, 'run_setup') as setup, \
