@@ -2,20 +2,44 @@
 
 PrimeBuddy 是面向启元 T1 / Q1 的语音技能平台：用户说出请求，Buddy 识别、理解并调用技能。平台负责语音入口、任务调度和进程管理，技能负责自己的业务、配置向导及资源清理。
 
-默认组合包只附带两个可选技能，源码见 [PrimeSkills](https://github.com/huang-kai/primeskills)：
+技能由独立的 [PrimeSkills](https://github.com/huang-kai/primeskills) 仓库维护，常用技能包括：
 
 | 技能 | 功能 |
 | --- | --- |
 | 点歌台 `diangetai` | QQ 音乐登录、搜歌与播放，可配置动作、表情和灯光联动 |
 | 成语接龙 `chengyu-chain` | 独占式语音游戏，自己处理答题、解释和退出，结束后交回 Buddy |
 
-安装向导默认不选技能，空格可勾选多个，回车后依次进入各技能自己的安装和配置向导；选择 `None` 可跳过技能安装，之后运行 `primebuddy onboard` 可补装。易来等其他技能可另行安装，不属于默认随包内容。当前版本为 **1.2.0**，变更见 [更新记录](CHANGELOG.md)，打包验证通过不代表真人语音或全部型号验收完成。
+安装向导默认不选技能，空格可勾选多个，回车后依次进入各技能自己的安装和配置向导；选择 `None` 可跳过技能安装，之后运行 `primebuddy onboard` 可补装。完整包的随包技能以 [release.json](release.json) 中的 `bundled_skills` 为准，其他技能可单独安装。版本变化见 [更新记录](CHANGELOG.md)，本机版本可用 `primebuddy --version` 查看。
 
 ## 快速部署
 
-1.2.0 准备两种安装包：`primebuddy-1.2.0.rpk` 是含上述两项技能的完整包，`primebuddy-1.2.0-core.rpk` 是不附带技能的纯平台包。两者安装步骤相同，详见[打包与产物说明](docs/packaging.md)。
+发行提供两种安装包：`primebuddy-<版本>.rpk` 是含随包技能的完整包，`primebuddy-<版本>-core.rpk` 是不附带技能的纯平台包。两者安装步骤相同；将 `<版本>` 替换为所下载包的版本号，详见[打包与产物说明](docs/packaging.md)。
 
 在机器人上使用系统 Python 3.10+、原厂 ROS 2 和设备随附的消息包；准备网络及模型服务 API Key。详细板型选择与 SSH 说明见[安装部署](docs/installation.md)。
+
+### 通过 PrimeConsole 部署
+
+在 PrimeConsole 中导入 RPK 并点击「部署到机器人」，等待安装结果显示通过。PrimeConsole将包解压到 `/home/user/lumina/packages/primebuddy`，根目录直接包含 `main.py`、`cfg/pkg.yaml` 和 `scripts/install.sh`。
+
+部署通过后，还需要通过 SSH 执行 Buddy 的安装脚本，准备依赖、注册命令并完成配置：
+
+```bash
+ssh run@<机器人IP>
+cd /home/user/lumina/packages/primebuddy
+source ./scripts/install.sh
+```
+
+这一步与从源码或解压 RPK 安装相同，只是安装源目录不同。Console 的包目录用于存放部署文件；Buddy 默认实际安装到当前用户的 `~/.primebuddy`，例如 `run` 用户的 `/home/run/.primebuddy`。仅在 Console 部署新包，不会自动更新这份已有安装。
+
+首次安装会自动进入向导，配置机器人连接、模型服务和可选技能。已有安装会保留配置、登录数据及技能启用状态，不自动重跑向导；需要重新配置或补装随包技能时，运行 `primebuddy onboard`。双板设备按安装器提示，在实际安装 Buddy 的板上执行后续命令。
+
+```bash
+primebuddy --version       # 确认已切换到新部署包的版本
+primebuddy skill list      # 查看技能及配置状态
+primebuddy start           # 启动语音会话
+```
+
+### 从源码或解压 RPK 安装
 
 从源码安装：
 
@@ -29,7 +53,7 @@ source ./scripts/install.sh
 
 ```bash
 unzip "primebuddy-<版本>.rpk" -d ./primebuddy-release
-cd primebuddy-release/primebuddy
+cd primebuddy-release
 source ./scripts/install.sh
 ```
 
@@ -69,7 +93,7 @@ primebuddy update                     # 更新平台，保留兼容的技能版�
 | 自定义安装向导、入口、返回值与版本 | [安装向导协议](docs/installation-protocol.md) |
 | 平台升级、兼容性、失败恢复及不兼容方案 | [升级与兼容](docs/upgrades.md) |
 | 大包、独立包、部署与 Release 产物 | [打包发布](docs/packaging.md) |
-| 当前版本已验证什么、还缺什么 | [发布验收记录](docs/release-validation.md) |
+| 已记录版本的验证范围与遗留项 | [发布验收记录](docs/release-validation.md) |
 | 开发环境、测试与提交规范 | [贡献指南](docs/contributing.md) |
 
 完整阅读路径见 [docs 文档目录](docs/README.md)。

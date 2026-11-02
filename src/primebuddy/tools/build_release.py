@@ -25,7 +25,7 @@ def add_tree(archive, source, prefix, exclude=()):
         if path.is_symlink():
             raise ValueError('发布源码不能包含符号链接')
         if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc':
-            archive.write(path, str(Path(prefix) / path.relative_to(source)))
+            archive.write(path, (Path(prefix) / path.relative_to(source)).as_posix())
 
 
 def skill_zip(source, output):
@@ -43,18 +43,20 @@ def skill_zip(source, output):
 def framework_zip(output, bundles, manifest=None):
     with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
         for name in ('main.py', 'README.md', 'requirements.txt'):
-            archive.write(ROOT / name, 'primebuddy/' + name)
+            archive.write(ROOT / name, name)
         if (ROOT / 'LICENSE').is_file():
-            archive.write(ROOT / 'LICENSE', 'primebuddy/LICENSE')
-        archive.writestr('primebuddy/release.json', json_text(manifest if manifest is not None else load_release(ROOT / 'release.json')))
-        archive.write(ROOT / 'CHANGELOG.md', 'primebuddy/CHANGELOG.md')
+            archive.write(ROOT / 'LICENSE', 'LICENSE')
+        archive.writestr('release.json', json_text(manifest if manifest is not None else load_release(ROOT / 'release.json')))
+        archive.write(ROOT / 'CHANGELOG.md', 'CHANGELOG.md')
         for name in ('config.example.yaml', 'providers.example.yaml', 'skill-adapters.example.yaml'):
-            archive.write(ROOT / 'cfg' / name, 'primebuddy/cfg/' + name)
+            archive.write(ROOT / 'cfg' / name, 'cfg/' + name)
+        if (ROOT / 'cfg/pkg.yaml').is_file():
+            archive.write(ROOT / 'cfg/pkg.yaml', 'cfg/pkg.yaml')
         for name in ('src', 'resource', 'scripts', 'docs'):
             # 随包技能由本次打包生成，不带入旧安装目录中的重复版本。
-            add_tree(archive, ROOT / name, 'primebuddy/' + name, exclude=('bundled',) if name == 'resource' else ())
+            add_tree(archive, ROOT / name, name, exclude=('bundled',) if name == 'resource' else ())
         for path in bundles:
-            archive.write(path, 'primebuddy/resource/bundled/' + path.name)
+            archive.write(path, 'resource/bundled/' + path.name)
 
 
 def json_text(data):

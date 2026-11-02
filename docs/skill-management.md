@@ -2,10 +2,10 @@
 
 ### 安装技能
 
-把技能的 RPK 上传到机器上，在包所在目录执行：
+把技能的 RPK 上传到机器上，在包所在目录执行。以下以点歌台为例，将 `<版本>` 替换为实际包名中的版本号：
 
 ```bash
-primebuddy skill install ./diangetai-0.4.1.rpk
+primebuddy skill install "./diangetai-<版本>.rpk"
 ```
 
 也可以安装本地的单个技能源码目录：
@@ -21,7 +21,7 @@ RPK 使用 ZIP 格式，旧 ZIP 包也支持；还可以传入 HTTPS 包下载�
 需要以后再配置时：
 
 ```bash
-primebuddy skill install ./diangetai-0.4.1.rpk --no-configure
+primebuddy skill install "./diangetai-<版本>.rpk" --no-configure
 primebuddy skill configure diangetai
 ```
 
@@ -29,7 +29,7 @@ primebuddy skill configure diangetai
 
 ```bash
 # 更新已有技能
-primebuddy skill install ./diangetai-0.4.1.rpk --replace
+primebuddy skill install "./diangetai-<版本>.rpk" --replace
 
 # 重新配置
 primebuddy skill configure diangetai
@@ -45,7 +45,7 @@ primebuddy skill enable diangetai
 
 ### 删除技能
 
-当前版本还没有 `skill uninstall` 命令，需要手动删除。以删除 `hello` 为例：
+删除技能通过以下手动步骤完成。以删除 `hello` 为例：
 
 1. 按 Ctrl+C 退出正在运行的 PrimeBuddy。
 2. 用 `primebuddy skill list` 确认 `hello` 的实际目录。在 `~/.primebuddy/cfg/skills.yaml` 中删除整个 `hello:` 条目，包括其下面缩进的内容；如果没有这个条目，跳过此步。

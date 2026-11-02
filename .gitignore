@@ -22,5 +22,6 @@ dist/
 /install.lock
 /cfg/*.yaml
 !/cfg/*.example.yaml
+!/cfg/pkg.yaml
 /cfg/skills/
 /design

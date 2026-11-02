@@ -89,6 +89,8 @@ def stage_application(source, stage):
              'cfg/config.example.yaml', 'cfg/providers.example.yaml', 'cfg/skill-adapters.example.yaml']
     if (source / 'LICENSE').exists():
         names.append('LICENSE')
+    if (source / 'cfg/pkg.yaml').exists():
+        names.append('cfg/pkg.yaml')
     if (source / 'docs').is_dir():
         names.append('docs')
     for name in names:

@@ -291,7 +291,10 @@ def run_update(*, check=False, version=None, recover=False):
             raise SetupError('发布清单缺少框架安装包。')
         download_artifact(manifest['framework'], archive)
         unpack(archive, temporary / 'unpacked')
-        source = temporary / 'unpacked/primebuddy'
+        source = temporary / 'unpacked'
+        # 新包直接以应用文件为根目录，仍兼容旧版带 primebuddy/ 外层的包。
+        if not (source / 'main.py').is_file():
+            source = source / 'primebuddy'
         embedded = load_release(source / 'release.json')
         if (embedded['version'], embedded['skills'], embedded.get('bundled_skills')) != (
                 manifest['version'], manifest['skills'], manifest.get('bundled_skills')):

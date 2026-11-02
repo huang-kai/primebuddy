@@ -63,7 +63,7 @@ def target_path(home, name):
     allowed = {'main.py', 'README.md', 'CHANGELOG.md', 'LICENSE', 'requirements.txt',
                'release.json', 'src', 'resource', 'scripts', 'docs', '_deps', 'bin/primebuddy', 'bin/env.sh',
                'cfg/config.example.yaml', 'cfg/providers.example.yaml', 'cfg/skill-adapters.example.yaml',
-               'cfg/skills.yaml', 'cfg/config.yaml', 'cfg/providers.yaml'}
+               'cfg/pkg.yaml', 'cfg/skills.yaml', 'cfg/config.yaml', 'cfg/providers.yaml'}
     if (name not in allowed and not (len(path.parts) == 2 and path.parts[0] == 'skills'
             and all(c.isascii() and (c.isalnum() or c in '-_') for c in path.parts[1]))):
         raise ValueError('升级事务包含无效路径。')

@@ -1,0 +1,6 @@
+user_id: "KK"
+version: "1.2.1"
+sdk_version: "v1.0.0"
+package_name: "primebuddy"
+author: "KK"
+description: "面向启元 T1 / Q1 的语音技能平台，支持语音交互、技能调度和进程管理。"

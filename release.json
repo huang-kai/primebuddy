@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "version": "1.2.0",
+  "version": "1.2.1",
   "bundled_skills": [
     "diangetai",
     "chengyu-chain"

@@ -9,7 +9,9 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+import zipfile
 
+from primebuddy import __version__
 from primebuddy.config.storage import SetupError, write_config
 
 
@@ -215,7 +217,7 @@ class UpdateIntegrationTests(unittest.TestCase):
     def assert_upgraded(self):
         from primebuddy.config.storage import read_config
         from primebuddy.tools.update import installed_version
-        self.assertEqual(installed_version(self.home), '1.2.0')
+        self.assertEqual(installed_version(self.home), __version__)
         index = read_config(self.home / 'cfg/skills.yaml')
         self.assertEqual(index['diangetai']['version'], '0.4.1')
         self.assertEqual(index['yeelight']['version'], '0.3.1')
@@ -231,6 +233,18 @@ class UpdateIntegrationTests(unittest.TestCase):
                 patch('primebuddy.skills.manager.run_setup') as configure:
             update.run_update()
         configure.assert_not_called()
+        self.assert_upgraded()
+
+    def test_online_update_accepts_legacy_framework_with_outer_directory(self):
+        from primebuddy.tools import update
+        archive = self.release / self.manifest['framework']['filename']
+        with zipfile.ZipFile(archive) as package:
+            contents = [(entry.filename, package.read(entry)) for entry in package.infolist()]
+        with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as package:
+            for name, content in contents:
+                package.writestr('primebuddy/' + name, content)
+        with patch.object(update, 'download_artifact', side_effect=self.download):
+            update.run_update()
         self.assert_upgraded()
 
     def test_platform_update_preserves_compatible_skill_files_and_optional_absence(self):
@@ -255,8 +269,8 @@ class UpdateIntegrationTests(unittest.TestCase):
     def test_old_install_bootstrap_uses_bundled_versions_in_one_transaction(self):
         from primebuddy.skills.manager import unpack
         from primebuddy.tools import install
-        unpack(self.release / 'primebuddy-1.2.0.rpk', self.root / 'unpacked')
-        source = self.root / 'unpacked/primebuddy'
+        unpack(self.release / f'primebuddy-{__version__}.rpk', self.root / 'unpacked')
+        source = self.root / 'unpacked'
         # 易来不在默认大包内；离线升级该旧技能须另行提供其独立包。
         artifact = self.manifest['skills']['yeelight']['artifact']
         shutil.copy2(self.release / artifact['filename'], source / 'resource/bundled' / artifact['filename'])
@@ -281,8 +295,8 @@ class UpdateIntegrationTests(unittest.TestCase):
     def test_online_and_offline_upgrade_refuse_pending_runtime_recovery(self):
         from primebuddy.tools import update, install
         from primebuddy.skills.manager import unpack
-        unpack(self.release / 'primebuddy-1.2.0.rpk', self.root / 'unpacked')
-        source = self.root / 'unpacked/primebuddy'
+        unpack(self.release / f'primebuddy-{__version__}.rpk', self.root / 'unpacked')
+        source = self.root / 'unpacked'
         marker = self.home / 'runtime/diangetai/cleanup-unconfirmed.json'
         marker.parent.mkdir(parents=True)
         marker.write_text('{"resources":["speaker.music"]}')

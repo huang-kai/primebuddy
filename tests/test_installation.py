@@ -441,11 +441,11 @@ class ReleaseTests(unittest.TestCase):
                     self.assertIsNone(package.testzip())
                     self.assertFalse(any('design' in Path(name).parts for name in package.namelist()))
             with zipfile.ZipFile(output / f'primebuddy-{__version__}.rpk') as framework:
-                self.assertEqual(framework.read('primebuddy/LICENSE'), (ROOT / 'LICENSE').read_bytes())
-                self.assertEqual({name for name in framework.namelist() if name.startswith('primebuddy/resource/bundled/')},
-                    {'primebuddy/resource/bundled/hello-0.1.0.rpk', 'primebuddy/resource/bundled/other-0.2.0.rpk'})
+                self.assertEqual(framework.read('LICENSE'), (ROOT / 'LICENSE').read_bytes())
+                self.assertEqual({name for name in framework.namelist() if name.startswith('resource/bundled/')},
+                    {'resource/bundled/hello-0.1.0.rpk', 'resource/bundled/other-0.2.0.rpk'})
                 for filename in ('hello-0.1.0.rpk', 'other-0.2.0.rpk'):
-                    self.assertEqual(framework.read('primebuddy/resource/bundled/' + filename), (output / filename).read_bytes())
+                    self.assertEqual(framework.read('resource/bundled/' + filename), (output / filename).read_bytes())
 
     def test_single_skill_cli_preserves_existing_rpk_unless_overwrite_is_requested(self):
         from primebuddy.tools import build_release as builder
@@ -488,7 +488,7 @@ class ReleaseTests(unittest.TestCase):
                 builder.main()
             self.assertEqual([path.name for path in separate.iterdir()], [f'primebuddy-{__version__}.rpk'])
             with zipfile.ZipFile(separate / f'primebuddy-{__version__}.rpk') as package:
-                self.assertFalse(any(name.startswith('primebuddy/resource/bundled/') for name in package.namelist()))
+                self.assertFalse(any(name.startswith('resource/bundled/') for name in package.namelist()))
 
     def test_installer_reuses_system_yaml_without_pip(self):
         installer = self.installer()
@@ -531,7 +531,7 @@ class ReleaseTests(unittest.TestCase):
             with zipfile.ZipFile(archive) as package:
                 package.extractall(directory / 'unpacked')
             env = dict(os.environ, PRIMEBUDDY_HOME=str(directory / 'data'),
-                       PYTHONPATH=str(directory / 'unpacked/primebuddy/src'))
+                       PYTHONPATH=str(directory / 'unpacked/src'))
             script = '''import sys
 from primebuddy.skills import manager as skills
 from primebuddy.cli.onboarding import onboard
@@ -575,16 +575,18 @@ print('BUNDLE_UPGRADE_OK')
             archive = builder.build_releases(directory / 'release', [skill])[0]
             with zipfile.ZipFile(archive) as package:
                 package.extractall(directory / 'unpacked')
-                self.assertEqual({name.split('/')[0] for name in package.namelist()}, {'primebuddy'})
-                self.assertIn('primebuddy/resource/bundled/hello-0.1.0.rpk', package.namelist())
-                self.assertIn('primebuddy/README.md', package.namelist())
-                self.assertEqual(package.read('primebuddy/LICENSE'), (ROOT / 'LICENSE').read_bytes())
-                bundled = io.BytesIO(package.read('primebuddy/resource/bundled/hello-0.1.0.rpk'))
+                self.assertIn('main.py', package.namelist())
+                self.assertIn('cfg/pkg.yaml', package.namelist())
+                self.assertFalse(any(name.startswith('primebuddy/') for name in package.namelist()))
+                self.assertIn('resource/bundled/hello-0.1.0.rpk', package.namelist())
+                self.assertIn('README.md', package.namelist())
+                self.assertEqual(package.read('LICENSE'), (ROOT / 'LICENSE').read_bytes())
+                bundled = io.BytesIO(package.read('resource/bundled/hello-0.1.0.rpk'))
             with zipfile.ZipFile(bundled) as package:
                 self.assertNotIn('credential.json', package.namelist())
             prefix = directory / 'install with space'
             bindir = prefix / 'bin'
-            app = directory / 'unpacked/primebuddy'
+            app = directory / 'unpacked'
             shell_home = directory / 'shell home'
             shell_home.mkdir()
             env = dict(os.environ, HOME=str(shell_home), SHELL='/bin/bash', PRIMEBUDDY_LOG_DIR=str(directory / 'logs'))
@@ -724,12 +726,12 @@ print('BUNDLE_UPGRADE_OK')
                 archive = build_release.build_releases(output, [])[0]
             with zipfile.ZipFile(archive) as package:
                 names = package.namelist()
-                self.assertIn('primebuddy/cfg/config.example.yaml', names)
-                self.assertIn('primebuddy/cfg/providers.example.yaml', names)
-                self.assertNotIn('primebuddy/cfg/config.yaml', names)
-                self.assertNotIn('primebuddy/cfg/providers.yaml', names)
-                self.assertFalse(any(name.startswith(('primebuddy/data/', 'primebuddy/bin/',
-                                                     'primebuddy/cfg/skills/', 'primebuddy/runtime/')) for name in names))
+                self.assertIn('cfg/config.example.yaml', names)
+                self.assertIn('cfg/providers.example.yaml', names)
+                self.assertNotIn('cfg/config.yaml', names)
+                self.assertNotIn('cfg/providers.yaml', names)
+                self.assertFalse(any(name.startswith(('data/', 'bin/',
+                                                     'cfg/skills/', 'runtime/')) for name in names))
 
     def test_release_with_docs_can_be_built_installed_and_run(self):
         installer = self.installer()
@@ -742,9 +744,9 @@ print('BUNDLE_UPGRADE_OK')
             with patch.object(build_release, 'ROOT', source):
                 archive = build_release.build_releases(directory / 'release', [make_skill(directory / 'hello')])[0]
             with zipfile.ZipFile(archive) as package:
-                self.assertIn('primebuddy/docs/README.md', package.namelist())
+                self.assertIn('docs/README.md', package.namelist())
                 package.extractall(directory / 'unpacked')
-            app = directory / 'unpacked/primebuddy'
+            app = directory / 'unpacked'
             home = directory / 'installed'
             with patch.object(installer, '__file__', str(app / 'src/primebuddy/tools/install.py')):
                 launcher = installer.install(home)
