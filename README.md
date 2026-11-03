@@ -1,5 +1,13 @@
 # PrimeBuddy
 
+> [!IMPORTANT]
+> **PrimeBuddy 已停止维护，后续开发已迁移至 [BotBuddy](https://github.com/huang-kai/botbuddy)。**
+>
+> 请前往新项目获取最新代码、提交 Issue 和参与开发：**https://github.com/huang-kai/botbuddy**。
+> 已有安装请先阅读 [BotBuddy 更名与迁移说明](https://github.com/huang-kai/botbuddy/blob/main/docs/name-migration.md)，保留原配置与登录数据；首次迁移使用新安装流程，旧版在线更新不会自动切换至新仓库。
+>
+> 本仓库保留历史代码、Issues 和 Release 供查阅，不再接收后续功能更新。下方内容为历史版本说明。
+
 PrimeBuddy 是面向启元 T1 / Q1 的语音技能平台：用户说出请求，Buddy 识别、理解并调用技能。平台负责语音入口、任务调度和进程管理，技能负责自己的业务、配置向导及资源清理。
 
 技能由独立的 [PrimeSkills](https://github.com/huang-kai/primeskills) 仓库维护，常用技能包括：
